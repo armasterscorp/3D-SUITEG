@@ -79,7 +79,10 @@ function parseAccounts(raw: string): SmtpAccountInput[] {
     .filter((account) => account.enabled);
 }
 
-function createSmtpTransport(account: SmtpAccountInput) {
+function createSmtpTransport(
+  account: SmtpAccountInput,
+  connectionTimeoutMs = 30000
+) {
   return nodemailer.createTransport({
     host: account.host,
     port: account.port,
@@ -93,9 +96,9 @@ function createSmtpTransport(account: SmtpAccountInput) {
     pool: true,
     maxConnections: 2,
     maxMessages: Infinity,
-    connectionTimeout: 30_000,
-    greetingTimeout: 30_000,
-    socketTimeout: 120_000,
+    connectionTimeout: connectionTimeoutMs,
+    greetingTimeout: connectionTimeoutMs,
+    socketTimeout: Math.max(connectionTimeoutMs * 3, 60000),
   });
 }
 
@@ -763,6 +766,74 @@ function sanitizeFilename(value: string): string {
 }
 
 
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function classifySmtpSendError(error: unknown): {
+  kind: 'invalid' | 'timeout' | 'message';
+  reason: string;
+} {
+  const value = error as {
+    code?: string;
+    responseCode?: number;
+    message?: string;
+  };
+
+  const code = String(value?.code || '').toUpperCase();
+  const responseCode = Number(value?.responseCode || 0);
+  const message = String(
+    value?.message || error || 'Unknown SMTP error'
+  );
+
+  const timeoutCodes = new Set([
+    'ETIMEDOUT',
+    'ESOCKETTIMEDOUT',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ECONNREFUSED',
+  ]);
+
+  if (
+    timeoutCodes.has(code) ||
+    /timeout|timed out|socket hang up|connection reset/i.test(
+      message
+    )
+  ) {
+    return {
+      kind: 'timeout',
+      reason: `${code ? `${code}: ` : ''}${message}`,
+    };
+  }
+
+  // Authentication/configuration failures invalidate the SMTP account.
+  if (
+    code === 'EAUTH' ||
+    responseCode === 535 ||
+    responseCode === 534 ||
+    responseCode === 530 ||
+    /authentication|invalid login|bad credentials|not authenticated/i.test(
+      message
+    )
+  ) {
+    return {
+      kind: 'invalid',
+      reason: `${code ? `${code}: ` : ''}${message}`,
+    };
+  }
+
+  // Recipient/message-specific failures do not invalidate the SMTP itself.
+  return {
+    kind: 'message',
+    reason: `${code ? `${code}: ` : ''}${message}`,
+  };
+}
+
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
@@ -789,6 +860,69 @@ export async function POST(request: NextRequest) {
 
     const rotateAccounts =
       String(formData.get('rotateAccounts') || 'false') === 'true';
+
+    const connectionTimeoutMs = Math.min(
+      120000,
+      Math.max(
+        5000,
+        Math.floor(
+          Number(formData.get('connectionTimeoutMs') || 30000)
+        )
+      )
+    );
+
+    const retryCount = Math.min(
+      5,
+      Math.max(
+        0,
+        Math.floor(
+          Number(formData.get('retryCount') || 0)
+        )
+      )
+    );
+
+    const retryDelayMs = Math.min(
+      120000,
+      Math.max(
+        0,
+        Math.floor(
+          Number(formData.get('retryDelayMs') || 0)
+        )
+      )
+    );
+
+    const perAccountDelayMs = Math.min(
+      120000,
+      Math.max(
+        0,
+        Math.floor(
+          Number(formData.get('perAccountDelayMs') || 0)
+        )
+      )
+    );
+
+    const threads = Math.min(
+      10,
+      Math.max(
+        1,
+        Math.floor(
+          Number(formData.get('threads') || 1)
+        )
+      )
+    );
+
+    const autoRetestTimeouts =
+      String(formData.get('autoRetestTimeouts') || 'false') === 'true';
+
+    const timeoutRetestDelayMs = Math.min(
+      600000,
+      Math.max(
+        10000,
+        Math.floor(
+          Number(formData.get('timeoutRetestDelayMs') || 60000)
+        )
+      )
+    );
 
     const recipients = Array.from(
       new Set(
@@ -989,22 +1123,32 @@ export async function POST(request: NextRequest) {
           for (const account of plan) {
             transporters.set(
               account.id,
-              createSmtpTransport(account)
+              createSmtpTransport(
+                account,
+                connectionTimeoutMs
+              )
             );
           }
 
           let rotationCursor = 0;
           let sentCount = 0;
           let failedCount = 0;
+          const removedAccountIds = new Set<string>();
 
           function nextAccount(): SmtpPlanAccount | null {
             if (!plan.length) return null;
 
             if (!rotateAccounts) {
               const first = plan[0];
-              return first.used < first.maxSends
-                ? first
-                : null;
+
+              if (
+                removedAccountIds.has(first.id) ||
+                first.used >= first.maxSends
+              ) {
+                return null;
+              }
+
+              return first;
             }
 
             for (
@@ -1018,7 +1162,10 @@ export async function POST(request: NextRequest) {
               rotationCursor =
                 (rotationCursor + 1) % plan.length;
 
-              if (candidate.used < candidate.maxSends) {
+              if (
+                !removedAccountIds.has(candidate.id) &&
+                candidate.used < candidate.maxSends
+              ) {
                 return candidate;
               }
             }
@@ -1026,12 +1173,79 @@ export async function POST(request: NextRequest) {
             return null;
           }
 
-          for (
-            let index = 0;
-            index < recipients.length;
-            index += 1
-          ) {
-            const recipient = recipients[index];
+          const accountReadyAt = new Map<string, number>();
+          const timedOutAccounts = new Map<
+            string,
+            { account: SmtpPlanAccount; retryAt: number }
+          >();
+
+          async function maybeRetestTimedOutAccounts() {
+            if (!autoRetestTimeouts || !timedOutAccounts.size) {
+              return;
+            }
+
+            const now = Date.now();
+
+            for (const [id, item] of timedOutAccounts) {
+              if (item.retryAt > now) continue;
+
+              const testTransport = createSmtpTransport(
+                item.account,
+                connectionTimeoutMs
+              );
+
+              try {
+                await testTransport.verify();
+
+                removedAccountIds.delete(id);
+                timedOutAccounts.delete(id);
+
+                transporters.set(
+                  id,
+                  createSmtpTransport(
+                    item.account,
+                    connectionTimeoutMs
+                  )
+                );
+
+                emit({
+                  type: 'pool_recovered',
+                  account: {
+                    id: item.account.id,
+                    label: item.account.label,
+                    host: item.account.host,
+                    port: item.account.port,
+                    security: item.account.security,
+                    username: item.account.username,
+                    password: item.account.password,
+                    fromEmail: item.account.fromEmail,
+                    enabled: item.account.enabled,
+                    maxSends: item.account.maxSends,
+                  },
+                });
+              } catch {
+                item.retryAt =
+                  Date.now() + timeoutRetestDelayMs;
+              } finally {
+                testTransport.close();
+              }
+            }
+          }
+
+          let queueCursor = 0;
+
+          async function worker(workerId: number) {
+            while (true) {
+              const index = queueCursor;
+              queueCursor += 1;
+
+              if (index >= recipients.length) {
+                return;
+              }
+
+              await maybeRetestTimedOutAccounts();
+
+              const recipient = recipients[index];
             const account = nextAccount();
 
             if (!account) {
@@ -1070,7 +1284,14 @@ export async function POST(request: NextRequest) {
               continue;
             }
 
-            try {
+
+              let attempt = 0;
+              let completed = false;
+
+              while (!completed && attempt <= retryCount) {
+                attempt += 1;
+
+                try {
               const subject = placeholders(
                 subjectTemplate,
                 recipient,
@@ -1305,6 +1526,23 @@ export async function POST(request: NextRequest) {
                 }
               }
 
+              const readyAt =
+                accountReadyAt.get(account.id) || 0;
+
+              const preSendWait = Math.max(
+                0,
+                readyAt - Date.now()
+              );
+
+              if (preSendWait > 0) {
+                await sleep(preSendWait);
+              }
+
+              accountReadyAt.set(
+                account.id,
+                Date.now() + perAccountDelayMs
+              );
+
               const info = await transporter.sendMail({
                 from: resolvedFromName
                   ? {
@@ -1344,23 +1582,105 @@ export async function POST(request: NextRequest) {
                 messageId: info.messageId,
                 response: info.response,
               });
-            } catch (error) {
-              failedCount += 1;
 
-              emit({
-                type: 'result',
-                index: index + 1,
-                total: recipients.length,
-                recipient,
-                accountEmail: account.fromEmail,
-                success: false,
-                error:
-                  error instanceof Error
-                    ? error.message
-                    : String(error),
-              });
+                  completed = true;
+                } catch (error) {
+                  const classified =
+                    classifySmtpSendError(error);
+
+                  const canRetry =
+                    classified.kind === 'timeout' &&
+                    attempt <= retryCount;
+
+                  if (canRetry) {
+                    emit({
+                      type: 'retry',
+                      index: index + 1,
+                      total: recipients.length,
+                      recipient,
+                      accountEmail: account.fromEmail,
+                      attempt,
+                      retryCount,
+                      error: classified.reason,
+                    });
+
+                    await sleep(retryDelayMs);
+                    continue;
+                  }
+
+                  failedCount += 1;
+
+                  if (
+                    classified.kind === 'invalid' ||
+                    classified.kind === 'timeout'
+                  ) {
+                    removedAccountIds.add(account.id);
+
+                    const transporterToClose =
+                      transporters.get(account.id);
+
+                    transporterToClose?.close();
+                    transporters.delete(account.id);
+
+                    if (
+                      classified.kind === 'timeout'
+                    ) {
+                      timedOutAccounts.set(
+                        account.id,
+                        {
+                          account,
+                          retryAt:
+                            Date.now() +
+                            timeoutRetestDelayMs,
+                        }
+                      );
+                    }
+
+                    emit({
+                      type: 'pool_update',
+                      status:
+                        classified.kind === 'invalid'
+                          ? 'invalid'
+                          : 'timeout',
+                      account: {
+                        id: account.id,
+                        label: account.label,
+                        host: account.host,
+                        port: account.port,
+                        security: account.security,
+                        username: account.username,
+                        password: account.password,
+                        fromEmail: account.fromEmail,
+                        enabled: account.enabled,
+                        maxSends: account.maxSends,
+                      },
+                      reason: classified.reason,
+                    });
+                  }
+
+                  emit({
+                    type: 'result',
+                    index: index + 1,
+                    total: recipients.length,
+                    recipient,
+                    accountEmail: account.fromEmail,
+                    success: false,
+                    error: classified.reason,
+                  });
+
+                  completed = true;
+                }
+              }
+
             }
           }
+
+          await Promise.all(
+            Array.from(
+              { length: threads },
+              (_, index) => worker(index + 1)
+            )
+          );
 
           emit({
             type: 'complete',
