@@ -4265,6 +4265,16 @@ function SmtpSenderPanel({
   const [attachmentLink, setAttachmentLink] = React.useState('');
   const [ctaLink, setCtaLink] = React.useState('');
 
+  const [smtpRandomizeAttachmentLinks, setSmtpRandomizeAttachmentLinks] =
+    React.useState(false);
+  const [smtpAttachmentLinkPoolText, setSmtpAttachmentLinkPoolText] =
+    React.useState('');
+
+  const [smtpRandomizeCtaLinks, setSmtpRandomizeCtaLinks] =
+    React.useState(false);
+  const [smtpCtaLinkPoolText, setSmtpCtaLinkPoolText] =
+    React.useState('');
+
   const [logoDevEnabled, setLogoDevEnabled] = React.useState(false);
   const [logoDevKey, setLogoDevKey] = React.useState('');
   const [logoDevSize, setLogoDevSize] = React.useState(128);
@@ -4525,6 +4535,88 @@ function SmtpSenderPanel({
     }
   }
 
+  const smtpAttachmentLinkPool = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          smtpAttachmentLinkPoolText
+            .split(/\r?\n/)
+            .map((value) => value.trim())
+            .filter(Boolean)
+        )
+      ),
+    [smtpAttachmentLinkPoolText]
+  );
+
+  const smtpCtaLinkPool = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          smtpCtaLinkPoolText
+            .split(/\r?\n/)
+            .map((value) => value.trim())
+            .filter(Boolean)
+        )
+      ),
+    [smtpCtaLinkPoolText]
+  );
+
+  async function loadAttachmentLinksFile(file: File | null) {
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      setSmtpAttachmentLinkPoolText(text);
+
+      const count = text
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter(Boolean).length;
+
+      onLog(
+        'success',
+        `Loaded ${count} Attachment Link line(s) from ${file.name}`
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      onLog(
+        'error',
+        `Could not read Attachment Link file: ${message}`
+      );
+      onToast('Could not read Attachment Link file', 'error');
+    }
+  }
+
+  async function loadCtaLinksFile(file: File | null) {
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      setSmtpCtaLinkPoolText(text);
+
+      const count = text
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter(Boolean).length;
+
+      onLog(
+        'success',
+        `Loaded ${count} CTA Link line(s) from ${file.name}`
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      onLog(
+        'error',
+        `Could not read CTA Link file: ${message}`
+      );
+      onToast('Could not read CTA Link file', 'error');
+    }
+  }
+
   function updateAccount(
     id: string,
     patch: Partial<SmtpAccount>
@@ -4684,7 +4776,24 @@ function SmtpSenderPanel({
       formData.append('messageMode', messageMode);
       formData.append('bodyTemplate', bodyTemplate);
       formData.append('attachmentLink', attachmentLink.trim());
+      formData.append(
+        'randomizeAttachmentLinks',
+        smtpRandomizeAttachmentLinks ? 'true' : 'false'
+      );
+      formData.append(
+        'attachmentLinkPool',
+        JSON.stringify(smtpAttachmentLinkPool)
+      );
+
       formData.append('ctaLink', ctaLink.trim());
+      formData.append(
+        'randomizeCtaLinks',
+        smtpRandomizeCtaLinks ? 'true' : 'false'
+      );
+      formData.append(
+        'ctaLinkPool',
+        JSON.stringify(smtpCtaLinkPool)
+      );
 
       formData.append('logoDevEnabled', logoDevEnabled ? 'true' : 'false');
       formData.append('logoDevKey', logoDevKey.trim());
@@ -5436,40 +5545,150 @@ function SmtpSenderPanel({
             />
           </Field>
 
-          <div className="space-y-2">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Attachment Link">
+          <div className="grid gap-3 xl:grid-cols-2">
+            <div className="space-y-3 rounded border border-slate-200 p-3">
+              <label className="flex items-center gap-2">
                 <input
-                  className="input"
-                  value={attachmentLink}
+                  type="checkbox"
+                  checked={smtpRandomizeAttachmentLinks}
                   onChange={(event) =>
-                    setAttachmentLink(event.target.value)
+                    setSmtpRandomizeAttachmentLinks(
+                      event.target.checked
+                    )
                   }
-                  placeholder="https://example.com/document#{EmailHex}"
                 />
-              </Field>
+                <span>
+                  <span className="font-medium">
+                    Randomize Attachment Links
+                  </span>
+                  <span className="block text-xs text-slate-500">
+                    Select one random Attachment Link per recipient.
+                  </span>
+                </span>
+              </label>
 
-              <Field label="CTA Link">
-                <input
-                  className="input"
-                  value={ctaLink}
-                  onChange={(event) =>
-                    setCtaLink(event.target.value)
-                  }
-                  placeholder="https://example.com/action#{Email}"
-                />
-              </Field>
+              {!smtpRandomizeAttachmentLinks ? (
+                <Field label="Attachment Link">
+                  <input
+                    className="input"
+                    value={attachmentLink}
+                    onChange={(event) =>
+                      setAttachmentLink(event.target.value)
+                    }
+                    placeholder="https://example.com/document#{EmailHex}"
+                  />
+                </Field>
+              ) : (
+                <>
+                  <Field
+                    label={`Attachment Link pool (${smtpAttachmentLinkPool.length})`}
+                  >
+                    <textarea
+                      className="input min-h-36 font-mono text-xs"
+                      value={smtpAttachmentLinkPoolText}
+                      onChange={(event) =>
+                        setSmtpAttachmentLinkPoolText(
+                          event.target.value
+                        )
+                      }
+                      placeholder={'https://site1.example/doc#email\nhttps://site2.example/doc#emailinhex\nhttps://site3.example/{EmailBase64}'}
+                    />
+                  </Field>
+
+                  <Field label="Upload Attachment Links (.txt)">
+                    <input
+                      type="file"
+                      accept=".txt,text/plain"
+                      className="input"
+                      onChange={(event) =>
+                        void loadAttachmentLinksFile(
+                          event.target.files?.[0] || null
+                        )
+                      }
+                    />
+                  </Field>
+                </>
+              )}
             </div>
 
-            <div className="text-xs leading-5 text-slate-500">
-              Link fields support all recipient autograbs plus
-              {' '}<code>{'{EmailBase64}'}</code> and
-              {' '}<code>{'{EmailHex}'}</code>.
-              Fragment shortcuts also work:
-              {' '}<code>#email</code>,
-              {' '}<code>#emailinbase64</code>,
-              {' '}<code>#emailinhex</code>.
+            <div className="space-y-3 rounded border border-slate-200 p-3">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={smtpRandomizeCtaLinks}
+                  onChange={(event) =>
+                    setSmtpRandomizeCtaLinks(
+                      event.target.checked
+                    )
+                  }
+                />
+                <span>
+                  <span className="font-medium">
+                    Randomize CTA Links
+                  </span>
+                  <span className="block text-xs text-slate-500">
+                    Select one random CTA Link per recipient.
+                  </span>
+                </span>
+              </label>
+
+              {!smtpRandomizeCtaLinks ? (
+                <Field label="CTA Link">
+                  <input
+                    className="input"
+                    value={ctaLink}
+                    onChange={(event) =>
+                      setCtaLink(event.target.value)
+                    }
+                    placeholder="https://example.com/action#{Email}"
+                  />
+                </Field>
+              ) : (
+                <>
+                  <Field
+                    label={`CTA Link pool (${smtpCtaLinkPool.length})`}
+                  >
+                    <textarea
+                      className="input min-h-36 font-mono text-xs"
+                      value={smtpCtaLinkPoolText}
+                      onChange={(event) =>
+                        setSmtpCtaLinkPoolText(
+                          event.target.value
+                        )
+                      }
+                      placeholder={'https://cta1.example/#email\nhttps://cta2.example/#emailinbase64\nhttps://cta3.example/{EmailHex}'}
+                    />
+                  </Field>
+
+                  <Field label="Upload CTA Links (.txt)">
+                    <input
+                      type="file"
+                      accept=".txt,text/plain"
+                      className="input"
+                      onChange={(event) =>
+                        void loadCtaLinksFile(
+                          event.target.files?.[0] || null
+                        )
+                      }
+                    />
+                  </Field>
+                </>
+              )}
             </div>
+          </div>
+
+          <div className="text-xs leading-5 text-slate-500">
+            All link entries support recipient autograbs including
+            {' '}<code>{'{Email}'}</code>,
+            {' '}<code>{'{EmailBase64}'}</code>,
+            {' '}<code>{'{EmailHex}'}</code>,
+            {' '}<code>{'{LocalPart}'}</code>,
+            {' '}<code>{'{Domain}'}</code>, and
+            {' '}<code>{'{DomainName}'}</code>.
+            Fragment shortcuts:
+            {' '}<code>#email</code>,
+            {' '}<code>#emailinbase64</code>,
+            {' '}<code>#emailinhex</code>.
           </div>
 
           <div className="space-y-3 rounded border border-slate-200 p-3">
