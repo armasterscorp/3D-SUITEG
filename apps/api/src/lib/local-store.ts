@@ -1,3 +1,9 @@
+// apps/api/src/lib/local-store.ts
+/* Added session-based proxy helpers for in-memory dashboard session.
+   These functions store proxies inside the existing dashboardSession state object
+   and provide atomic (in-process) rotation for local runs.
+*/
+
 type CampaignStatus = 'draft' | 'active' | 'paused' | 'completed';
 type LogStatus = 'success' | 'error' | 'warning' | 'info';
 
@@ -42,6 +48,10 @@ type LocalCampaignLog = {
   createdAt: Date;
 };
 
+// DashboardSessionState extended below with a session-only `proxies` field which is
+// intentionally stored as part of the in-memory dashboard session. We avoid
+// adding DB persistence; proxies live only in the server process memory.
+
 type DashboardSessionState = {
   provider: string;
   batchSize: string;
@@ -52,6 +62,14 @@ type DashboardSessionState = {
   recipientsCount: number;
   files: Array<{ name: string; size: number }>;
   updatedAt: string;
+};
+
+// Session-scoped proxy configuration stored inside dashboardSession.proxies
+export type DashboardProxyConfig = {
+  enabled: boolean;
+  proxies: string[]; // full proxy URLs (socks5:// or http://), optionally user:pass@
+  rotationIndex?: number; // internal index used for round-robin
+  maxAttempts?: number; // number of total attempts when sending
 };
 
 type RuntimeEvent = {
@@ -347,6 +365,71 @@ export function updateDashboardSessionLocal(input: Omit<DashboardSessionState, '
 export function getDashboardSessionLocal() {
   return getState().dashboardSession;
 }
+
+// New session proxy helpers ----------------------------------------------------
+
+export function updateDashboardProxiesLocal(config: Partial<DashboardProxyConfig>) {
+  const state = getState();
+  // dashboardSession may be null; initialize a minimal session if needed
+  const base = (state.dashboardSession as any) || {
+    provider: 'smtp',
+    batchSize: '10',
+    delay: '1000',
+    rotateIds: false,
+    subject: '',
+    message: '',
+    recipientsCount: 0,
+    files: [],
+    updatedAt: new Date().toISOString(),
+  };
+
+  const existingProxies: DashboardProxyConfig = (base.proxies as DashboardProxyConfig) || {
+    enabled: false,
+    proxies: [],
+    rotationIndex: 0,
+    maxAttempts: 3,
+  };
+
+  const next: DashboardProxyConfig = {
+    enabled: config.enabled ?? existingProxies.enabled,
+    proxies: config.proxies ?? existingProxies.proxies,
+    rotationIndex: config.rotationIndex ?? existingProxies.rotationIndex ?? 0,
+    maxAttempts: config.maxAttempts ?? existingProxies.maxAttempts ?? 3,
+  };
+
+  base.proxies = next;
+  base.updatedAt = new Date().toISOString();
+  state.dashboardSession = base;
+
+  addEvent('dashboard.proxies.updated', { enabled: next.enabled, proxiesCount: next.proxies.length });
+  return next;
+}
+
+export function getDashboardProxiesLocal(): DashboardProxyConfig | null {
+  const state = getState();
+  return (state.dashboardSession as any)?.proxies ?? null;
+}
+
+/**
+ * Pick the next proxy for this in-process session using round-robin and persist the
+ * rotationIndex back into the in-memory session state. Returns null if not configured.
+ */
+export function pickNextSessionProxy(): string | null {
+  const state = getState();
+  const session = (state.dashboardSession as any) || null;
+  if (!session || !session.proxies) return null;
+  const cfg: DashboardProxyConfig = session.proxies;
+  if (!cfg.enabled || !Array.isArray(cfg.proxies) || cfg.proxies.length === 0) return null;
+  const idx = (cfg.rotationIndex ?? 0) % cfg.proxies.length;
+  const proxy = cfg.proxies[idx];
+  cfg.rotationIndex = ((cfg.rotationIndex ?? 0) + 1) % cfg.proxies.length;
+  session.proxies = cfg;
+  state.dashboardSession = session;
+  addEvent('dashboard.proxy.rotation', { proxy, nextIndex: cfg.rotationIndex });
+  return proxy;
+}
+
+// end session proxy helpers ---------------------------------------------------
 
 export function recordUploadMetadataLocal(details: {
   filename: string;
