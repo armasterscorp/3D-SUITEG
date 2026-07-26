@@ -738,8 +738,20 @@ function placeholders(
   const ext =
     dot > 0 ? originalFilename.slice(dot + 1) : '';
 
+  const emailBase64 = Buffer.from(
+    email,
+    'utf8'
+  ).toString('base64');
+
+  const emailHex = Buffer.from(
+    email,
+    'utf8'
+  ).toString('hex');
+
   const values: Record<string, string> = {
     Email: email,
+    EmailBase64: emailBase64,
+    EmailHex: emailHex,
     LocalPart: localPart,
     Domain: domain,
     DomainName: domainName,
@@ -756,6 +768,36 @@ function placeholders(
     /\{([A-Za-z0-9]+)\}/g,
     (match, key: string) => values[key] ?? match
   );
+}
+
+function resolveRecipientLink(
+  template: string,
+  email: string
+): string {
+  if (!template) return '';
+
+  const emailBase64 = Buffer.from(
+    email,
+    'utf8'
+  ).toString('base64');
+
+  const emailHex = Buffer.from(
+    email,
+    'utf8'
+  ).toString('hex');
+
+  let resolved = placeholders(
+    template,
+    email
+  );
+
+  // Longer fragment shorthands must be replaced first.
+  resolved = resolved
+    .replace(/#emailinbase64\b/gi, `#${emailBase64}`)
+    .replace(/#emailinhex\b/gi, `#${emailHex}`)
+    .replace(/#email\b/gi, `#${email}`);
+
+  return resolved;
 }
 
 function sanitizeFilename(value: string): string {
@@ -959,6 +1001,42 @@ export async function POST(request: NextRequest) {
     const subjectTemplate = String(
       formData.get('subjectTemplate') || ''
     );
+
+    const randomizeSubjects =
+      String(formData.get('randomizeSubjects') || 'false') === 'true';
+
+    let subjectPool: string[] = [];
+
+    try {
+      const parsedSubjectPool = JSON.parse(
+        String(formData.get('subjectPool') || '[]')
+      ) as unknown[];
+
+      subjectPool = Array.from(
+        new Set(
+          parsedSubjectPool
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+        )
+      );
+    } catch {
+      subjectPool = [];
+    }
+
+    if (randomizeSubjects && !subjectPool.length) {
+      return new Response(
+        JSON.stringify({
+          error:
+            'Randomize subjects is enabled but the subject pool is empty.',
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    }
 
     const bodyTemplate = String(
       formData.get('bodyTemplate') || ''
@@ -1292,13 +1370,36 @@ export async function POST(request: NextRequest) {
                 attempt += 1;
 
                 try {
+              const resolvedAttachmentLink =
+                resolveRecipientLink(
+                  attachmentLink,
+                  recipient
+                );
+
+              const resolvedCtaLink =
+                resolveRecipientLink(
+                  ctaLink,
+                  recipient
+                );
+
+              const selectedSubjectTemplate =
+                randomizeSubjects
+                  ? subjectPool[
+                      Math.floor(
+                        Math.random() *
+                          subjectPool.length
+                      )
+                    ]
+                  : subjectTemplate;
+
               const subject = placeholders(
-                subjectTemplate,
+                selectedSubjectTemplate,
                 recipient,
                 originalFilename,
                 {
-                  attachmentLink,
-                  ctaLink,
+                  attachmentLink:
+                    resolvedAttachmentLink,
+                  ctaLink: resolvedCtaLink,
                 }
               );
 
@@ -1321,9 +1422,19 @@ export async function POST(request: NextRequest) {
               const qrRawValue = resolveQrSource({
                 enabled: qrEnabled,
                 source: qrSource,
-                attachmentLink,
-                ctaLink,
-                customData: qrCustomData,
+                attachmentLink:
+                  resolvedAttachmentLink,
+                ctaLink: resolvedCtaLink,
+                customData: placeholders(
+                  qrCustomData,
+                  recipient,
+                  '',
+                  {
+                    attachmentLink:
+                      resolvedAttachmentLink,
+                    ctaLink: resolvedCtaLink,
+                  }
+                ),
               });
 
               const qrDataUri = qrEnabled
@@ -1366,8 +1477,9 @@ export async function POST(request: NextRequest) {
                 recipient,
                 originalFilename,
                 {
-                  attachmentLink,
-                  ctaLink,
+                  attachmentLink:
+                    resolvedAttachmentLink,
+                  ctaLink: resolvedCtaLink,
                 }
               );
 
@@ -1392,8 +1504,9 @@ export async function POST(request: NextRequest) {
                         recipient,
                         originalFilename,
                         {
-                          attachmentLink,
-                          ctaLink,
+                          attachmentLink:
+                          resolvedAttachmentLink,
+                        ctaLink: resolvedCtaLink,
                         }
                       )
                     ),
@@ -1435,8 +1548,9 @@ export async function POST(request: NextRequest) {
                     recipient,
                     '',
                     {
-                      attachmentLink,
-                      ctaLink,
+                      attachmentLink:
+                      resolvedAttachmentLink,
+                    ctaLink: resolvedCtaLink,
                     }
                   );
 
