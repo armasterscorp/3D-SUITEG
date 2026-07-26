@@ -25,7 +25,7 @@ import {
   Zap,
 } from 'lucide-react';
 
-type SenderKey = 'wetransfer' | 'adobe' | 'gmail' | 'quickbooks' | 'docusign';
+type SenderKey = 'wetransfer' | 'adobe' | 'gmail' | 'smtp' | 'quickbooks' | 'docusign';
 type LeadStatus = 'pending' | 'sending' | 'sent' | 'failed' | 'skipped';
 type RunState = 'idle' | 'running' | 'stopped' | 'completed' | 'completed_with_errors' | 'failed';
 type LogLevel = 'info' | 'success' | 'warning' | 'error' | 'stopped' | 'system';
@@ -250,12 +250,13 @@ type WeTransferSendLeadApiResponse = {
   } | null;
 };
 
-const SENDER_KEYS: SenderKey[] = ['wetransfer', 'adobe', 'gmail', 'quickbooks', 'docusign'];
+const SENDER_KEYS: SenderKey[] = ['wetransfer', 'adobe', 'gmail', 'smtp', 'quickbooks', 'docusign'];
 
 const SENDERS: Array<{ key: SenderKey; label: string }> = [
   { key: 'wetransfer', label: 'WeTransfer' },
   { key: 'adobe', label: 'Adobe Acrobat' },
   { key: 'gmail', label: 'Gmail' },
+  { key: 'smtp', label: 'SMTP' },
   { key: 'quickbooks', label: 'QuickBooks' },
   { key: 'docusign', label: 'DocuSign' },
 ];
@@ -453,6 +454,7 @@ function createDefaultSenderConfigs(): Record<SenderKey, SenderConfig> {
     wetransfer: createDefaultSenderConfig(),
     adobe: createDefaultSenderConfig(),
     gmail: createDefaultSenderConfig(),
+    smtp: createDefaultSenderConfig(),
     quickbooks: createDefaultSenderConfig(),
     docusign: createDefaultSenderConfig(),
   };
@@ -2738,6 +2740,14 @@ export default function DashboardPage() {
               onLog={(level, message) => appendLog(level, message, 'gmail')}
               onToast={addToast}
             />
+          ) : activeSender === 'smtp' ? (
+            <SmtpSenderPanel
+              leadEmails={leads
+                .map((lead) => lead.email || lead.normalized)
+                .filter((email): email is string => Boolean(email))}
+              onLog={(level, message) => appendLog(level, message, 'smtp')}
+              onToast={addToast}
+            />
           ) : (
             <MockSenderPanel
               sender={activeSender}
@@ -3974,6 +3984,997 @@ type GmailConnectedAccount = {
   connectedAt: string;
   profileDirectory?: string | null;
 };
+
+
+type SmtpAccount = {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  security: 'starttls' | 'ssl' | 'none';
+  username: string;
+  password: string;
+  fromEmail: string;
+  enabled: boolean;
+  maxSends: number;
+};
+
+function SmtpSenderPanel({
+  leadEmails,
+  onLog,
+  onToast,
+}: {
+  leadEmails: string[];
+  onLog: (level: LogLevel, message: string) => void;
+  onToast: (message: string, level?: LogLevel) => void;
+}) {
+  const [accounts, setAccounts] = React.useState<SmtpAccount[]>([
+    {
+      id: makeId('smtp'),
+      label: 'SMTP Account 1',
+      host: '',
+      port: 587,
+      security: 'starttls',
+      username: '',
+      password: '',
+      fromEmail: '',
+      enabled: true,
+      maxSends: 350,
+    },
+  ]);
+
+  const [rotateAccounts, setRotateAccounts] = React.useState(false);
+  const [selectedAccountId, setSelectedAccountId] = React.useState('');
+  const [fromName, setFromName] = React.useState('{DomainName}');
+  const [replyTo, setReplyTo] = React.useState('');
+  const [recipientsText, setRecipientsText] = React.useState('');
+  const [subjectTemplate, setSubjectTemplate] = React.useState(
+    'Document for {DomainName}'
+  );
+  const [messageMode, setMessageMode] = React.useState<'text' | 'html'>('html');
+  const [bodyTemplate, setBodyTemplate] = React.useState(
+    '<html><body style="font-family:Arial,sans-serif;"><p>Hello,</p><p>Please review the attached document.</p></body></html>'
+  );
+
+  const [attachmentLink, setAttachmentLink] = React.useState('');
+  const [ctaLink, setCtaLink] = React.useState('');
+
+  const [logoDevEnabled, setLogoDevEnabled] = React.useState(false);
+  const [logoDevKey, setLogoDevKey] = React.useState('');
+  const [logoDevSize, setLogoDevSize] = React.useState(128);
+  const [logoDevFormat, setLogoDevFormat] = React.useState<'png' | 'webp'>('png');
+  const [logoDevTheme, setLogoDevTheme] = React.useState<
+    'light' | 'dark' | 'auto'
+  >('auto');
+
+  const [qrEnabled, setQrEnabled] = React.useState(false);
+  const [qrSource, setQrSource] = React.useState<
+    'attachment-link' | 'cta-link' | 'custom'
+  >('attachment-link');
+  const [qrCustomData, setQrCustomData] = React.useState('');
+
+  const [attachmentEnabled, setAttachmentEnabled] = React.useState(false);
+  const [attachmentMode, setAttachmentMode] = React.useState<
+    'upload' | 'html-pdf' | 'html-pptx' | 'html-docx' | 'html-svg'
+  >('upload');
+  const [attachmentHtml, setAttachmentHtml] = React.useState(
+    '<html><body style="font-family:Arial,sans-serif;padding:32px;"><img src="{CompanyLogo}" style="max-width:160px;height:auto;"><h2>Document for {DomainName}</h2><p>Reference: {Random8}</p><img src="{QRCode}" style="width:140px;height:140px;"></body></html>'
+  );
+  const [attachmentNameTemplate, setAttachmentNameTemplate] = React.useState(
+    '{DomainName}_Document_{Date}.{Ext}'
+  );
+  const [attachment, setAttachment] = React.useState<File | null>(null);
+  const [sending, setSending] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!recipientsText.trim() && leadEmails.length) {
+      setRecipientsText(leadEmails.join('\n'));
+    }
+  }, [leadEmails, recipientsText]);
+
+  React.useEffect(() => {
+    if (!selectedAccountId && accounts.length) {
+      setSelectedAccountId(accounts[0].id);
+    }
+  }, [accounts, selectedAccountId]);
+
+  const recipients = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          recipientsText
+            .split(/[\n,;\s]+/)
+            .map((value) => value.trim().toLowerCase())
+            .filter((value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
+        )
+      ),
+    [recipientsText]
+  );
+
+  function updateAccount(
+    id: string,
+    patch: Partial<SmtpAccount>
+  ) {
+    setAccounts((current) =>
+      current.map((account) =>
+        account.id === id ? { ...account, ...patch } : account
+      )
+    );
+  }
+
+  function addAccount() {
+    setAccounts((current) => [
+      ...current,
+      {
+        id: makeId('smtp'),
+        label: `SMTP Account ${current.length + 1}`,
+        host: '',
+        port: 587,
+        security: 'starttls',
+        username: '',
+        password: '',
+        fromEmail: '',
+        enabled: true,
+        maxSends: 350,
+      },
+    ]);
+  }
+
+  function removeAccount(id: string) {
+    setAccounts((current) => {
+      if (current.length <= 1) return current;
+      return current.filter((account) => account.id !== id);
+    });
+
+    if (selectedAccountId === id) {
+      setSelectedAccountId('');
+    }
+  }
+
+  function buildLogoPreviewUrl(domain: string): string {
+    if (!logoDevEnabled || !logoDevKey.trim()) return '';
+
+    const params = new URLSearchParams({
+      token: logoDevKey.trim(),
+      size: String(Math.min(800, Math.max(16, logoDevSize || 128))),
+      format: logoDevFormat,
+      theme: logoDevTheme,
+    });
+
+    return `https://img.logo.dev/${encodeURIComponent(
+      domain
+    )}?${params.toString()}`;
+  }
+
+  function previewHtml(source: string): string {
+    let html = source || '';
+
+    html = html.replace(/\{CompanyLogo\}/gi, buildLogoPreviewUrl('example.com'));
+
+    html = html
+      .replace(/\{Email\}/gi, 'alex@example.com')
+      .replace(/\{LocalPart\}/gi, 'alex')
+      .replace(/\{Domain\}/gi, 'example.com')
+      .replace(/\{DomainName\}/gi, 'example')
+      .replace(/\{Date\}/gi, new Date().toISOString().slice(0, 10))
+      .replace(/\{Random6\}/gi, '492817')
+      .replace(/\{Random8\}/gi, '57284019')
+      .replace(/\{AttachmentLink\}/gi, attachmentLink || '#')
+      .replace(/\{CTA\}/gi, ctaLink || '#');
+
+    return html;
+  }
+
+  async function sendSmtp() {
+    const usableAccounts = accounts.filter((account) => {
+      if (!account.enabled) return false;
+      if (!account.host.trim()) return false;
+      if (!account.port) return false;
+      if (!account.username.trim()) return false;
+      if (!account.password) return false;
+      if (!account.fromEmail.trim()) return false;
+      if (account.maxSends <= 0) return false;
+      return true;
+    });
+
+    if (!recipients.length) {
+      onToast('Add at least one valid recipient', 'warning');
+      return;
+    }
+
+    if (rotateAccounts) {
+      if (!usableAccounts.length) {
+        onToast('Configure at least one enabled SMTP account', 'warning');
+        return;
+      }
+    } else {
+      const selected = accounts.find(
+        (account) => account.id === selectedAccountId
+      );
+
+      if (
+        !selected ||
+        !selected.host.trim() ||
+        !selected.username.trim() ||
+        !selected.password ||
+        !selected.fromEmail.trim()
+      ) {
+        onToast('Complete the selected SMTP account first', 'warning');
+        return;
+      }
+    }
+
+    setSending(true);
+
+    try {
+      const plan = rotateAccounts
+        ? usableAccounts
+        : accounts.filter(
+            (account) => account.id === selectedAccountId
+          );
+
+      const formData = new FormData();
+      formData.append('accounts', JSON.stringify(plan));
+      formData.append('rotateAccounts', rotateAccounts ? 'true' : 'false');
+      formData.append('recipients', JSON.stringify(recipients));
+      formData.append('fromName', fromName);
+      formData.append('replyTo', replyTo.trim());
+      formData.append('subjectTemplate', subjectTemplate);
+      formData.append('messageMode', messageMode);
+      formData.append('bodyTemplate', bodyTemplate);
+      formData.append('attachmentLink', attachmentLink.trim());
+      formData.append('ctaLink', ctaLink.trim());
+
+      formData.append('logoDevEnabled', logoDevEnabled ? 'true' : 'false');
+      formData.append('logoDevKey', logoDevKey.trim());
+      formData.append('logoDevSize', String(logoDevSize));
+      formData.append('logoDevFormat', logoDevFormat);
+      formData.append('logoDevTheme', logoDevTheme);
+
+      formData.append('qrEnabled', qrEnabled ? 'true' : 'false');
+      formData.append('qrSource', qrSource);
+      formData.append('qrCustomData', qrCustomData.trim());
+
+      formData.append(
+        'attachmentEnabled',
+        attachmentEnabled ? 'true' : 'false'
+      );
+      formData.append('attachmentMode', attachmentMode);
+      formData.append('attachmentHtml', attachmentHtml);
+      formData.append(
+        'attachmentNameTemplate',
+        attachmentNameTemplate
+      );
+
+      if (
+        attachmentEnabled &&
+        attachmentMode === 'upload' &&
+        attachment
+      ) {
+        formData.append('attachment', attachment);
+      }
+
+      onLog(
+        'info',
+        rotateAccounts
+          ? `SMTP run started — ${recipients.length} recipient(s), ${plan.length} account(s)`
+          : `SMTP run started — ${recipients.length} recipient(s)`
+      );
+
+      const response = await fetch('/api/smtp/send', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok || !response.body) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(
+          errorText ||
+            `SMTP send failed (HTTP ${response.status})`
+        );
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
+
+          let newlineIndex = buffer.indexOf('\n');
+
+          while (newlineIndex >= 0) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+
+            if (line) {
+              try {
+                const event = JSON.parse(line) as {
+                  type?: string;
+                  index?: number;
+                  total?: number;
+                  recipient?: string;
+                  accountEmail?: string;
+                  success?: boolean;
+                  messageId?: string;
+                  response?: string;
+                  error?: string;
+                  sentCount?: number;
+                  failedCount?: number;
+                };
+
+                if (event.type === 'result') {
+                  if (event.success) {
+                    onLog(
+                      'success',
+                      `${event.index}/${event.total} ✅ Email sent successfully to ${event.recipient}${
+                        event.accountEmail
+                          ? ` — via ${event.accountEmail}`
+                          : ''
+                      }`
+                    );
+                  } else {
+                    onLog(
+                      'error',
+                      `${event.index}/${event.total} ❌ Email failed to ${event.recipient}${
+                        event.accountEmail
+                          ? ` — via ${event.accountEmail}`
+                          : ''
+                      } — ${event.error || 'unknown SMTP error'}`
+                    );
+                  }
+                } else if (event.type === 'complete') {
+                  onLog(
+                    event.failedCount ? 'warning' : 'success',
+                    `SMTP complete — ${event.sentCount || 0} sent, ${
+                      event.failedCount || 0
+                    } failed, ${recipients.length} total`
+                  );
+                }
+              } catch {
+                // Ignore malformed partial stream records.
+              }
+            }
+
+            newlineIndex = buffer.indexOf('\n');
+          }
+        }
+
+        if (done) break;
+      }
+
+      onToast('SMTP run completed', 'success');
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      onLog('error', `SMTP send failed: ${message}`);
+      onToast(message, 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="grid xl:grid-cols-2 gap-4">
+      <Panel title="Authenticated SMTP Accounts">
+        <div className="space-y-3">
+          <div className="rounded border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+            Add the SMTP credentials supplied by your mail provider. Passwords
+            stay in the current dashboard state and are sent only to the local
+            3D Suite API for this SMTP run.
+          </div>
+
+          {accounts.map((account, index) => (
+            <div
+              key={account.id}
+              className="space-y-3 rounded border border-slate-200 p-3"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={account.enabled}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        enabled: event.target.checked,
+                      })
+                    }
+                  />
+                  <span className="font-semibold">
+                    {account.label || `SMTP Account ${index + 1}`}
+                  </span>
+                </label>
+
+                {accounts.length > 1 && (
+                  <button
+                    type="button"
+                    className="text-xs text-red-600"
+                    onClick={() => removeAccount(account.id)}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+
+              <Field label="Account label">
+                <input
+                  className="input"
+                  value={account.label}
+                  onChange={(event) =>
+                    updateAccount(account.id, {
+                      label: event.target.value,
+                    })
+                  }
+                />
+              </Field>
+
+              <div className="grid gap-3 sm:grid-cols-[1fr_120px_160px]">
+                <Field label="SMTP host">
+                  <input
+                    className="input"
+                    value={account.host}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        host: event.target.value,
+                      })
+                    }
+                    placeholder="smtp.example.com"
+                  />
+                </Field>
+
+                <Field label="Port">
+                  <input
+                    type="number"
+                    className="input"
+                    value={account.port}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        port: Number(event.target.value || 587),
+                      })
+                    }
+                  />
+                </Field>
+
+                <Field label="Security">
+                  <select
+                    className="input"
+                    value={account.security}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        security: event.target.value as
+                          | 'starttls'
+                          | 'ssl'
+                          | 'none',
+                      })
+                    }
+                  >
+                    <option value="starttls">STARTTLS</option>
+                    <option value="ssl">SSL/TLS</option>
+                    <option value="none">None</option>
+                  </select>
+                </Field>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Username">
+                  <input
+                    className="input"
+                    value={account.username}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        username: event.target.value,
+                      })
+                    }
+                    autoComplete="off"
+                  />
+                </Field>
+
+                <Field label="Password / app password">
+                  <input
+                    type="password"
+                    className="input"
+                    value={account.password}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        password: event.target.value,
+                      })
+                    }
+                    autoComplete="new-password"
+                  />
+                </Field>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="From email">
+                  <input
+                    type="email"
+                    className="input"
+                    value={account.fromEmail}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        fromEmail: event.target.value,
+                      })
+                    }
+                    placeholder="sender@example.com"
+                  />
+                </Field>
+
+                <Field label="Max sends for this run">
+                  <input
+                    type="number"
+                    min={1}
+                    className="input"
+                    value={account.maxSends}
+                    onChange={(event) =>
+                      updateAccount(account.id, {
+                        maxSends: Math.max(
+                          1,
+                          Number(event.target.value || 1)
+                        ),
+                      })
+                    }
+                  />
+                </Field>
+              </div>
+            </div>
+          ))}
+
+          <button
+            type="button"
+            className="rounded border border-slate-300 px-3 py-2 text-sm"
+            onClick={addAccount}
+          >
+            + Add SMTP account
+          </button>
+
+          <label className="flex items-center gap-2 rounded border border-slate-200 p-3">
+            <input
+              type="checkbox"
+              checked={rotateAccounts}
+              onChange={(event) =>
+                setRotateAccounts(event.target.checked)
+              }
+            />
+            <span>
+              <span className="font-medium">Rotate SMTP accounts</span>
+              <span className="block text-xs text-slate-500">
+                Round-robin across enabled accounts until each configured
+                Max sends value is reached.
+              </span>
+            </span>
+          </label>
+
+          {!rotateAccounts && (
+            <Field label="SMTP account to use">
+              <select
+                className="input"
+                value={selectedAccountId}
+                onChange={(event) =>
+                  setSelectedAccountId(event.target.value)
+                }
+              >
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.label || account.fromEmail || account.id}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+        </div>
+      </Panel>
+
+      <Panel title="SMTP Message & Documents">
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="From name">
+              <input
+                className="input"
+                value={fromName}
+                onChange={(event) =>
+                  setFromName(event.target.value)
+                }
+                placeholder="{DomainName} Team"
+              />
+              <div className="mt-1 text-xs text-slate-500">
+                Supports recipient autograb placeholders.
+              </div>
+            </Field>
+
+            <Field label="Reply-To — optional">
+              <input
+                type="email"
+                className="input"
+                value={replyTo}
+                onChange={(event) =>
+                  setReplyTo(event.target.value)
+                }
+                placeholder="replies@example.com"
+              />
+            </Field>
+          </div>
+
+          <Field label={`Recipients (${recipients.length})`}>
+            <textarea
+              className="input min-h-36"
+              value={recipientsText}
+              onChange={(event) =>
+                setRecipientsText(event.target.value)
+              }
+              placeholder="user1@example.com&#10;user2@example.com"
+            />
+          </Field>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Attachment Link">
+              <input
+                className="input"
+                value={attachmentLink}
+                onChange={(event) =>
+                  setAttachmentLink(event.target.value)
+                }
+                placeholder="https://example.com/document"
+              />
+            </Field>
+
+            <Field label="CTA Link">
+              <input
+                className="input"
+                value={ctaLink}
+                onChange={(event) =>
+                  setCtaLink(event.target.value)
+                }
+                placeholder="https://example.com/action"
+              />
+            </Field>
+          </div>
+
+          <Field label="Subject">
+            <input
+              className="input"
+              value={subjectTemplate}
+              onChange={(event) =>
+                setSubjectTemplate(event.target.value)
+              }
+            />
+          </Field>
+
+          <Field label="Message format">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className={`rounded border px-3 py-2 ${
+                  messageMode === 'text'
+                    ? 'border-[#6C63FF] bg-violet-50 text-violet-700'
+                    : 'border-slate-300'
+                }`}
+                onClick={() => setMessageMode('text')}
+              >
+                Plain Text
+              </button>
+              <button
+                type="button"
+                className={`rounded border px-3 py-2 ${
+                  messageMode === 'html'
+                    ? 'border-[#6C63FF] bg-violet-50 text-violet-700'
+                    : 'border-slate-300'
+                }`}
+                onClick={() => setMessageMode('html')}
+              >
+                HTML
+              </button>
+            </div>
+          </Field>
+
+          <div
+            className={`grid gap-3 ${
+              messageMode === 'html'
+                ? 'xl:grid-cols-2'
+                : 'grid-cols-1'
+            }`}
+          >
+            <Field label={messageMode === 'html' ? 'HTML message' : 'Message'}>
+              <textarea
+                className="input min-h-[320px] font-mono text-sm"
+                value={bodyTemplate}
+                onChange={(event) =>
+                  setBodyTemplate(event.target.value)
+                }
+              />
+            </Field>
+
+            {messageMode === 'html' && (
+              <Field label="Live HTML preview">
+                <div className="overflow-hidden rounded border border-slate-300 bg-white">
+                  <iframe
+                    title="SMTP HTML preview"
+                    sandbox=""
+                    className="h-[320px] w-full bg-white"
+                    srcDoc={previewHtml(bodyTemplate)}
+                  />
+                </div>
+              </Field>
+            )}
+          </div>
+
+          {messageMode === 'html' && (
+            <div className="space-y-3 rounded border border-slate-200 p-3">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={logoDevEnabled}
+                  onChange={(event) =>
+                    setLogoDevEnabled(event.target.checked)
+                  }
+                />
+                <span className="font-medium">
+                  Enable Logo.dev {`{CompanyLogo}`}
+                </span>
+              </label>
+
+              {logoDevEnabled && (
+                <>
+                  <Field label="Logo.dev Publishable Key">
+                    <input
+                      className="input"
+                      value={logoDevKey}
+                      onChange={(event) =>
+                        setLogoDevKey(event.target.value)
+                      }
+                      placeholder="pk_..."
+                    />
+                  </Field>
+
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Field label="Logo size">
+                      <input
+                        type="number"
+                        min={16}
+                        max={800}
+                        className="input"
+                        value={logoDevSize}
+                        onChange={(event) =>
+                          setLogoDevSize(
+                            Math.min(
+                              800,
+                              Math.max(
+                                16,
+                                Number(event.target.value || 128)
+                              )
+                            )
+                          )
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Format">
+                      <select
+                        className="input"
+                        value={logoDevFormat}
+                        onChange={(event) =>
+                          setLogoDevFormat(
+                            event.target.value as 'png' | 'webp'
+                          )
+                        }
+                      >
+                        <option value="png">PNG</option>
+                        <option value="webp">WebP</option>
+                      </select>
+                    </Field>
+
+                    <Field label="Theme">
+                      <select
+                        className="input"
+                        value={logoDevTheme}
+                        onChange={(event) =>
+                          setLogoDevTheme(
+                            event.target.value as
+                              | 'light'
+                              | 'dark'
+                              | 'auto'
+                          )
+                        }
+                      >
+                        <option value="auto">Auto</option>
+                        <option value="light">Light</option>
+                        <option value="dark">Dark</option>
+                      </select>
+                    </Field>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="space-y-3 rounded border border-slate-200 p-3">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={qrEnabled}
+                onChange={(event) =>
+                  setQrEnabled(event.target.checked)
+                }
+              />
+              <span className="font-medium">
+                Enable QR code {`{QRCode}`}
+              </span>
+            </label>
+
+            {qrEnabled && (
+              <>
+                <Field label="QR data source">
+                  <select
+                    className="input"
+                    value={qrSource}
+                    onChange={(event) =>
+                      setQrSource(
+                        event.target.value as
+                          | 'attachment-link'
+                          | 'cta-link'
+                          | 'custom'
+                      )
+                    }
+                  >
+                    <option value="attachment-link">
+                      Attachment Link
+                    </option>
+                    <option value="cta-link">CTA Link</option>
+                    <option value="custom">Custom data / URL</option>
+                  </select>
+                </Field>
+
+                {qrSource === 'custom' && (
+                  <Field label="Custom QR data / URL">
+                    <textarea
+                      className="input min-h-24"
+                      value={qrCustomData}
+                      onChange={(event) =>
+                        setQrCustomData(event.target.value)
+                      }
+                    />
+                  </Field>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="space-y-3 rounded border border-slate-200 p-3">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={attachmentEnabled}
+                onChange={(event) =>
+                  setAttachmentEnabled(event.target.checked)
+                }
+              />
+              <span className="font-medium">Enable attachment</span>
+            </label>
+
+            {attachmentEnabled && (
+              <>
+                <Field label="Attachment mode">
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                    {[
+                      ['upload', 'Upload'],
+                      ['html-pdf', 'HTML → PDF'],
+                      ['html-pptx', 'HTML → PPTX'],
+                      ['html-docx', 'HTML → DOCX'],
+                      ['html-svg', 'HTML → SVG'],
+                    ].map(([value, label]) => (
+                      <label
+                        key={value}
+                        className={`flex items-center gap-2 rounded border px-2 py-2 ${
+                          attachmentMode === value
+                            ? 'border-[#6C63FF] bg-violet-50'
+                            : 'border-slate-300'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="smtpAttachmentMode"
+                          checked={attachmentMode === value}
+                          onChange={() =>
+                            setAttachmentMode(
+                              value as
+                                | 'upload'
+                                | 'html-pdf'
+                                | 'html-pptx'
+                                | 'html-docx'
+                                | 'html-svg'
+                            )
+                          }
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </Field>
+
+                {attachmentMode === 'upload' ? (
+                  <Field label="Upload file">
+                    <input
+                      type="file"
+                      className="input"
+                      onChange={(event) =>
+                        setAttachment(
+                          event.target.files?.[0] || null
+                        )
+                      }
+                    />
+                  </Field>
+                ) : (
+                  <div className="grid gap-3 xl:grid-cols-2">
+                    <Field label="Attachment HTML">
+                      <textarea
+                        className="input min-h-[320px] font-mono text-sm"
+                        value={attachmentHtml}
+                        onChange={(event) =>
+                          setAttachmentHtml(event.target.value)
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Attachment preview">
+                      <div className="overflow-hidden rounded border border-slate-300 bg-white">
+                        <iframe
+                          title="SMTP attachment preview"
+                          sandbox=""
+                          className="h-[320px] w-full bg-white"
+                          srcDoc={previewHtml(attachmentHtml)}
+                        />
+                      </div>
+                    </Field>
+                  </div>
+                )}
+
+                <Field label="Attachment name template">
+                  <input
+                    className="input"
+                    value={attachmentNameTemplate}
+                    onChange={(event) =>
+                      setAttachmentNameTemplate(
+                        event.target.value
+                      )
+                    }
+                  />
+                </Field>
+              </>
+            )}
+          </div>
+
+          <div className="text-xs text-slate-500 leading-5">
+            Autograb: <code>{'{Email}'}</code>,{' '}
+            <code>{'{LocalPart}'}</code>,{' '}
+            <code>{'{Domain}'}</code>,{' '}
+            <code>{'{DomainName}'}</code>,{' '}
+            <code>{'{Date}'}</code>,{' '}
+            <code>{'{Random6}'}</code>,{' '}
+            <code>{'{Random8}'}</code>,{' '}
+            <code>{'{CompanyLogo}'}</code>,{' '}
+            <code>{'{QRCode}'}</code>,{' '}
+            <code>{'{AttachmentLink}'}</code>,{' '}
+            <code>{'{CTA}'}</code>.
+          </div>
+
+          <button
+            type="button"
+            className="rounded bg-[#6C63FF] px-4 py-2 text-white disabled:opacity-50"
+            disabled={sending || recipients.length === 0}
+            onClick={() => void sendSmtp()}
+          >
+            {sending
+              ? `Sending SMTP (${recipients.length})…`
+              : `Send ${recipients.length || ''} via SMTP`}
+          </button>
+        </div>
+      </Panel>
+    </div>
+  );
+}
 
 function GmailSenderPanel({
   leadEmails,
