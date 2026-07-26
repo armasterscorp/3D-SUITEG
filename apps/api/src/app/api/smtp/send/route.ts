@@ -1053,9 +1053,91 @@ export async function POST(request: NextRequest) {
       formData.get('attachmentLink') || ''
     ).trim();
 
+    const randomizeAttachmentLinks =
+      String(
+        formData.get('randomizeAttachmentLinks') || 'false'
+      ) === 'true';
+
+    let attachmentLinkPool: string[] = [];
+
+    try {
+      const parsedAttachmentLinks = JSON.parse(
+        String(formData.get('attachmentLinkPool') || '[]')
+      ) as unknown[];
+
+      attachmentLinkPool = Array.from(
+        new Set(
+          parsedAttachmentLinks
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+        )
+      );
+    } catch {
+      attachmentLinkPool = [];
+    }
+
+    if (
+      randomizeAttachmentLinks &&
+      !attachmentLinkPool.length
+    ) {
+      return new Response(
+        JSON.stringify({
+          error:
+            'Randomize Attachment Links is enabled but the Attachment Link pool is empty.',
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    }
+
     const ctaLink = String(
       formData.get('ctaLink') || ''
     ).trim();
+
+    const randomizeCtaLinks =
+      String(
+        formData.get('randomizeCtaLinks') || 'false'
+      ) === 'true';
+
+    let ctaLinkPool: string[] = [];
+
+    try {
+      const parsedCtaLinks = JSON.parse(
+        String(formData.get('ctaLinkPool') || '[]')
+      ) as unknown[];
+
+      ctaLinkPool = Array.from(
+        new Set(
+          parsedCtaLinks
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+        )
+      );
+    } catch {
+      ctaLinkPool = [];
+    }
+
+    if (
+      randomizeCtaLinks &&
+      !ctaLinkPool.length
+    ) {
+      return new Response(
+        JSON.stringify({
+          error:
+            'Randomize CTA Links is enabled but the CTA Link pool is empty.',
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    }
 
     const logoDevEnabled =
       String(formData.get('logoDevEnabled') || 'false') === 'true';
@@ -1370,15 +1452,35 @@ export async function POST(request: NextRequest) {
                 attempt += 1;
 
                 try {
+              const selectedAttachmentLink =
+                randomizeAttachmentLinks
+                  ? attachmentLinkPool[
+                      Math.floor(
+                        Math.random() *
+                          attachmentLinkPool.length
+                      )
+                    ]
+                  : attachmentLink;
+
+              const selectedCtaLink =
+                randomizeCtaLinks
+                  ? ctaLinkPool[
+                      Math.floor(
+                        Math.random() *
+                          ctaLinkPool.length
+                      )
+                    ]
+                  : ctaLink;
+
               const resolvedAttachmentLink =
                 resolveRecipientLink(
-                  attachmentLink,
+                  selectedAttachmentLink,
                   recipient
                 );
 
               const resolvedCtaLink =
                 resolveRecipientLink(
-                  ctaLink,
+                  selectedCtaLink,
                   recipient
                 );
 
