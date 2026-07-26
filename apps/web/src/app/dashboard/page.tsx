@@ -794,6 +794,27 @@ export default function DashboardPage() {
             password: '',
           }));
           setBrowserProxyHasPassword(Boolean(data.hasPassword));
+
+          const loadedProtocol =
+            data.protocol === 'socks5' ? 'socks5' : 'http';
+          const loadedHost = String(data.host ?? '');
+          const loadedPort = String(data.port ?? '8080');
+          const loadedUsername = String(data.username ?? '');
+
+          setCredentials((prev) => ({
+            ...prev,
+            wetransfer: {
+              ...prev.wetransfer,
+              proxy:
+                Boolean(data.enabled) && loadedHost
+                  ? `${loadedProtocol}://${
+                      loadedUsername
+                        ? `${encodeURIComponent(loadedUsername)}@`
+                        : ''
+                    }${loadedHost}:${loadedPort}`
+                  : '',
+            },
+          }));
         }
       })
       .catch(() => undefined);
@@ -867,6 +888,94 @@ export default function DashboardPage() {
     setLogs([]);
     syncStoredLogs([]);
     addToast('Logs cleared', 'success');
+  }
+
+  function globalBrowserProxyString(): string {
+    if (!browserProxy.host.trim()) return '';
+
+    const auth =
+      browserProxy.username.trim()
+        ? `${encodeURIComponent(browserProxy.username.trim())}${
+            browserProxy.password
+              ? `:${encodeURIComponent(browserProxy.password)}`
+              : ''
+          }@`
+        : '';
+
+    return `${browserProxy.protocol}://${auth}${browserProxy.host.trim()}:${
+      browserProxy.port || '8080'
+    }`;
+  }
+
+  function applyGlobalProxyText(value: string) {
+    const raw = value.trim();
+
+    if (!raw) {
+      setBrowserProxy((prev) => ({
+        ...prev,
+        enabled: false,
+        host: '',
+        username: '',
+        password: '',
+      }));
+
+      setCredentials((prev) => ({
+        ...prev,
+        wetransfer: {
+          ...prev.wetransfer,
+          proxy: '',
+        },
+      }));
+      return;
+    }
+
+    let candidate = raw;
+
+    if (!/^[a-z]+:\/\//i.test(candidate)) {
+      candidate = `http://${candidate}`;
+    }
+
+    try {
+      const parsed = new URL(candidate);
+
+      const protocol =
+        parsed.protocol.toLowerCase() === 'socks5:'
+          ? 'socks5'
+          : 'http';
+
+      const host = parsed.hostname;
+      const port =
+        parsed.port ||
+        (protocol === 'socks5' ? '1080' : '8080');
+
+      if (!host) {
+        throw new Error('Proxy host is missing');
+      }
+
+      setBrowserProxy({
+        enabled: true,
+        protocol,
+        host,
+        port,
+        username: decodeURIComponent(parsed.username || ''),
+        password: decodeURIComponent(parsed.password || ''),
+      });
+
+      setCredentials((prev) => ({
+        ...prev,
+        wetransfer: {
+          ...prev.wetransfer,
+          proxy: raw,
+        },
+      }));
+
+      setBrowserProxyError(null);
+      setBrowserProxyTestResult(null);
+    } catch {
+      setBrowserProxyError(
+        'Invalid proxy. Use http://host:port, socks5://host:port, or include username/password in the URL.'
+      );
+    }
   }
 
   async function saveBrowserProxySettings() {
@@ -2961,20 +3070,94 @@ export default function DashboardPage() {
                       />
                     </Field>
 
-                    <Field label="Proxy (optional)">
-                      <input
-                        className="input"
-                        value={credentials.wetransfer.proxy}
-                        onChange={(e) =>
-                          setCredentials((p) => ({
-                            ...p,
-                            wetransfer: {
-                              ...p.wetransfer,
-                              proxy: e.target.value,
-                            },
-                          }))
-                        }
-                      />
+                    <Field label="Global Browser Proxy (optional)">
+                      <div className="space-y-2">
+                        <input
+                          className="input"
+                          value={credentials.wetransfer.proxy}
+                          onChange={(event) => {
+                            const value = event.target.value;
+
+                            setCredentials((prev) => ({
+                              ...prev,
+                              wetransfer: {
+                                ...prev.wetransfer,
+                                proxy: value,
+                              },
+                            }));
+                          }}
+                          onBlur={(event) =>
+                            applyGlobalProxyText(event.target.value)
+                          }
+                          placeholder="http://host:port or socks5://user:pass@host:port"
+                        />
+
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            className="rounded bg-[#6C63FF] px-3 py-2 text-xs text-white disabled:opacity-50"
+                            disabled={browserProxySaving}
+                            onClick={() => {
+                              applyGlobalProxyText(
+                                credentials.wetransfer.proxy
+                              );
+
+                              window.setTimeout(() => {
+                                void saveBrowserProxySettings();
+                              }, 0);
+                            }}
+                          >
+                            {browserProxySaving
+                              ? 'Saving…'
+                              : 'Apply Globally'}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="rounded border border-slate-300 px-3 py-2 text-xs disabled:opacity-50"
+                            disabled={
+                              browserProxyTesting ||
+                              !browserProxy.enabled
+                            }
+                            onClick={() =>
+                              void testBrowserProxy()
+                            }
+                          >
+                            {browserProxyTesting
+                              ? 'Testing…'
+                              : 'Test Proxy'}
+                          </button>
+                        </div>
+
+                        <div className="text-[11px] leading-5 text-slate-500">
+                          This is the shared 3D Suite browser proxy. WeTransfer,
+                          Adobe browser automation, and browser-based connection
+                          flows reuse this setting. Direct API transports keep
+                          their normal provider connection.
+                        </div>
+
+                        {browserProxyError && (
+                          <div className="text-xs text-red-600">
+                            {browserProxyError}
+                          </div>
+                        )}
+
+                        {browserProxyTestResult && (
+                          <div
+                            className={`text-xs ${
+                              browserProxyTestResult.level ===
+                              'success'
+                                ? 'text-emerald-600'
+                                : browserProxyTestResult.level ===
+                                    'warning'
+                                  ? 'text-amber-600'
+                                  : 'text-red-600'
+                            }`}
+                          >
+                            {browserProxyTestResult.message}
+                          </div>
+                        )}
+                      </div>
                     </Field>
                   </div>
                 </div>
@@ -2997,7 +3180,25 @@ export default function DashboardPage() {
           {activeModal === 'settings' && (
             <div className="space-y-4 text-sm">
               <div className="grid sm:grid-cols-2 gap-3">
-                <Field label="Proxy"><input className="input" value={settingsState.proxy} onChange={(e) => setSettingsState((p) => ({ ...p, proxy: e.target.value }))} /></Field>
+                <Field label="Global Browser Proxy">
+                  <input
+                    className="input"
+                    value={credentials.wetransfer.proxy}
+                    onChange={(event) =>
+                      setCredentials((prev) => ({
+                        ...prev,
+                        wetransfer: {
+                          ...prev.wetransfer,
+                          proxy: event.target.value,
+                        },
+                      }))
+                    }
+                    onBlur={(event) =>
+                      applyGlobalProxyText(event.target.value)
+                    }
+                    placeholder="Configured from WeTransfer / Credentials"
+                  />
+                </Field>
                 <Field label="Default Rate Limit (sec)"><input type="number" className="input" value={settingsState.defaultDelay} onChange={(e) => setSettingsState((p) => ({ ...p, defaultDelay: Number(e.target.value || 1) }))} /></Field>
                 <Field label="Default File Type"><input className="input" value={settingsState.defaultFileType} onChange={(e) => setSettingsState((p) => ({ ...p, defaultFileType: e.target.value }))} /></Field>
                 <Field label="Default Temp Provider"><input className="input" value={settingsState.defaultTempProvider} onChange={(e) => setSettingsState((p) => ({ ...p, defaultTempProvider: e.target.value }))} /></Field>
@@ -4052,6 +4253,10 @@ function SmtpSenderPanel({
   const [subjectTemplate, setSubjectTemplate] = React.useState(
     'Document for {DomainName}'
   );
+  const [smtpRandomizeSubjects, setSmtpRandomizeSubjects] =
+    React.useState(false);
+  const [smtpSubjectPoolText, setSmtpSubjectPoolText] =
+    React.useState('');
   const [messageMode, setMessageMode] = React.useState<'text' | 'html'>('html');
   const [bodyTemplate, setBodyTemplate] = React.useState(
     '<html><body style="font-family:Arial,sans-serif;"><p>Hello,</p><p>Please review the attached document.</p></body></html>'
@@ -4283,6 +4488,43 @@ function SmtpSenderPanel({
     }
   }
 
+  const smtpSubjectPool = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          smtpSubjectPoolText
+            .split(/\r?\n/)
+            .map((value) => value.trim())
+            .filter(Boolean)
+        )
+      ),
+    [smtpSubjectPoolText]
+  );
+
+  async function loadSubjectFile(file: File | null) {
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      setSmtpSubjectPoolText(text);
+
+      const count = text
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter(Boolean).length;
+
+      onLog(
+        'success',
+        `Loaded ${count} SMTP subject line(s) from ${file.name}`
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      onLog('error', `Could not read subject file: ${message}`);
+      onToast('Could not read subject file', 'error');
+    }
+  }
+
   function updateAccount(
     id: string,
     patch: Partial<SmtpAccount>
@@ -4431,6 +4673,14 @@ function SmtpSenderPanel({
       formData.append('fromName', fromName);
       formData.append('replyTo', replyTo.trim());
       formData.append('subjectTemplate', subjectTemplate);
+      formData.append(
+        'randomizeSubjects',
+        smtpRandomizeSubjects ? 'true' : 'false'
+      );
+      formData.append(
+        'subjectPool',
+        JSON.stringify(smtpSubjectPool)
+      );
       formData.append('messageMode', messageMode);
       formData.append('bodyTemplate', bodyTemplate);
       formData.append('attachmentLink', attachmentLink.trim());
@@ -5186,39 +5436,104 @@ function SmtpSenderPanel({
             />
           </Field>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Attachment Link">
-              <input
-                className="input"
-                value={attachmentLink}
-                onChange={(event) =>
-                  setAttachmentLink(event.target.value)
-                }
-                placeholder="https://example.com/document"
-              />
-            </Field>
+          <div className="space-y-2">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Attachment Link">
+                <input
+                  className="input"
+                  value={attachmentLink}
+                  onChange={(event) =>
+                    setAttachmentLink(event.target.value)
+                  }
+                  placeholder="https://example.com/document#{EmailHex}"
+                />
+              </Field>
 
-            <Field label="CTA Link">
-              <input
-                className="input"
-                value={ctaLink}
-                onChange={(event) =>
-                  setCtaLink(event.target.value)
-                }
-                placeholder="https://example.com/action"
-              />
-            </Field>
+              <Field label="CTA Link">
+                <input
+                  className="input"
+                  value={ctaLink}
+                  onChange={(event) =>
+                    setCtaLink(event.target.value)
+                  }
+                  placeholder="https://example.com/action#{Email}"
+                />
+              </Field>
+            </div>
+
+            <div className="text-xs leading-5 text-slate-500">
+              Link fields support all recipient autograbs plus
+              {' '}<code>{'{EmailBase64}'}</code> and
+              {' '}<code>{'{EmailHex}'}</code>.
+              Fragment shortcuts also work:
+              {' '}<code>#email</code>,
+              {' '}<code>#emailinbase64</code>,
+              {' '}<code>#emailinhex</code>.
+            </div>
           </div>
 
-          <Field label="Subject">
-            <input
-              className="input"
-              value={subjectTemplate}
-              onChange={(event) =>
-                setSubjectTemplate(event.target.value)
-              }
-            />
-          </Field>
+          <div className="space-y-3 rounded border border-slate-200 p-3">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={smtpRandomizeSubjects}
+                onChange={(event) =>
+                  setSmtpRandomizeSubjects(event.target.checked)
+                }
+              />
+              <span>
+                <span className="font-medium">Randomize subjects</span>
+                <span className="block text-xs text-slate-500">
+                  Pick one subject randomly for each recipient.
+                  Every line supports autograb placeholders.
+                </span>
+              </span>
+            </label>
+
+            {!smtpRandomizeSubjects ? (
+              <Field label="Subject">
+                <input
+                  className="input"
+                  value={subjectTemplate}
+                  onChange={(event) =>
+                    setSubjectTemplate(event.target.value)
+                  }
+                  placeholder="Document for {DomainName}"
+                />
+              </Field>
+            ) : (
+              <>
+                <Field label={`Subject pool (${smtpSubjectPool.length})`}>
+                  <textarea
+                    className="input min-h-36 font-mono text-sm"
+                    value={smtpSubjectPoolText}
+                    onChange={(event) =>
+                      setSmtpSubjectPoolText(event.target.value)
+                    }
+                    placeholder={'Document for {DomainName}\n{DomainName} — Please review\nReference {Random8} for {Email}'}
+                  />
+                </Field>
+
+                <Field label="Upload subjects (.txt)">
+                  <input
+                    type="file"
+                    accept=".txt,text/plain"
+                    className="input"
+                    onChange={(event) =>
+                      void loadSubjectFile(
+                        event.target.files?.[0] || null
+                      )
+                    }
+                  />
+                </Field>
+
+                <div className="text-xs text-slate-500">
+                  One subject per line. Blank lines are ignored and duplicate
+                  subject lines are removed automatically.
+                </div>
+              </>
+            )}
+          </div>
 
           <Field label="Message format">
             <div className="grid grid-cols-2 gap-2">
@@ -5534,7 +5849,9 @@ function SmtpSenderPanel({
             <code>{'{CompanyLogo}'}</code>,{' '}
             <code>{'{QRCode}'}</code>,{' '}
             <code>{'{AttachmentLink}'}</code>,{' '}
-            <code>{'{CTA}'}</code>.
+            <code>{'{CTA}'}</code>,{' '}
+            <code>{'{EmailBase64}'}</code>,{' '}
+            <code>{'{EmailHex}'}</code>.
           </div>
 
           <button
