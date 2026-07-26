@@ -4,6 +4,7 @@ import { generateTemporaryEmail } from '@/lib/temp-email';
 import { createWeTransferTransfer } from '@/lib/wetransfer';
 import { sendEmail } from '@/lib/email';
 import { generatePersonalizedPdf } from '@/lib/pdf';
+import { getDashboardProxiesLocal, pickNextSessionProxy } from '@/lib/local-store';
 
 export async function processCampaignLead(
   campaignId: string,
@@ -93,6 +94,20 @@ export async function processCampaignLead(
     );
 
     // Step 4: Send email with WeTransfer link
+    // Build session proxy options (session-scoped, in-memory)
+    const sessionProxiesConfig = getDashboardProxiesLocal();
+    let proxyList: string[] | undefined = undefined;
+    let explicitProxyOverride: string | null = null;
+    let maxAttempts = 3;
+    let enforceProxyOnly = false;
+
+    if (sessionProxiesConfig?.enabled && Array.isArray(sessionProxiesConfig.proxies) && sessionProxiesConfig.proxies.length) {
+      explicitProxyOverride = pickNextSessionProxy(); // advances rotation
+      proxyList = sessionProxiesConfig.proxies;
+      maxAttempts = sessionProxiesConfig.maxAttempts ?? 3;
+      enforceProxyOnly = true; // per user choice: require proxy-only when enabled
+    }
+
     const emailResult = await sendEmail(
       email,
       `Your Personalized Document - ${name}`,
@@ -101,11 +116,18 @@ export async function processCampaignLead(
         <p>Your personalized document is ready for download.</p>
         <p><a href="${weTransferResult.downloadUrl}" style="background-color: #007bff; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none;">Download Now</a></p>
         <p>This link will expire in 7 days.</p>
-      `
+      `,
+      undefined,
+      {
+        proxyList,
+        explicitProxyOverride,
+        maxAttempts,
+        enforceProxyOnly,
+      }
     );
 
     if (!emailResult.success) {
-      throw new Error(`Failed to send email: ${emailResult.error}`);
+      throw new Error(emailResult.error || 'Email send failed');
     }
 
     // Step 5: Update lead with success
@@ -133,7 +155,7 @@ export async function processCampaignLead(
       leadId,
       'sent_email',
       'success',
-      { email }
+      { email, proxyUsed: emailResult.proxyUsed ?? null, tried: emailResult.tried ?? undefined }
     );
 
     return {
