@@ -4023,6 +4023,27 @@ function SmtpSenderPanel({
     },
   ]);
 
+  const [smtpBulkInput, setSmtpBulkInput] = React.useState('');
+  const [smtpInvalid, setSmtpInvalid] = React.useState<
+    Array<SmtpAccount & { reason: string }>
+  >([]);
+  const [smtpTemporaryTimeouts, setSmtpTemporaryTimeouts] = React.useState<
+    Array<SmtpAccount & { reason: string }>
+  >([]);
+  const [testingSmtp, setTestingSmtp] = React.useState(false);
+
+  const [smtpConnectionTimeoutMs, setSmtpConnectionTimeoutMs] =
+    React.useState(30000);
+  const [smtpRetryCount, setSmtpRetryCount] = React.useState(2);
+  const [smtpRetryDelayMs, setSmtpRetryDelayMs] = React.useState(5000);
+  const [smtpPerAccountDelayMs, setSmtpPerAccountDelayMs] =
+    React.useState(1000);
+  const [smtpThreads, setSmtpThreads] = React.useState(2);
+  const [smtpAutoRetestTimeouts, setSmtpAutoRetestTimeouts] =
+    React.useState(true);
+  const [smtpTimeoutRetestDelayMs, setSmtpTimeoutRetestDelayMs] =
+    React.useState(60000);
+
   const [rotateAccounts, setRotateAccounts] = React.useState(false);
   const [selectedAccountId, setSelectedAccountId] = React.useState('');
   const [fromName, setFromName] = React.useState('{DomainName}');
@@ -4090,6 +4111,177 @@ function SmtpSenderPanel({
       ),
     [recipientsText]
   );
+
+  function parseBulkSmtpInput(): SmtpAccount[] {
+    const parsed: SmtpAccount[] = [];
+
+    const lines = smtpBulkInput
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const parts = line.split(':');
+
+      if (parts.length < 5) {
+        onLog(
+          'warning',
+          `SMTP import skipped line ${index + 1}: expected host:port:user:pass:fromemail`
+        );
+        continue;
+      }
+
+      const host = parts.shift()?.trim() || '';
+      const portRaw = parts.shift()?.trim() || '';
+      const username = parts.shift()?.trim() || '';
+      const fromEmail = parts.pop()?.trim() || '';
+      const password = parts.join(':');
+
+      const port = Number(portRaw);
+
+      if (
+        !host ||
+        !Number.isFinite(port) ||
+        port <= 0 ||
+        !username ||
+        !password ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromEmail)
+      ) {
+        onLog(
+          'warning',
+          `SMTP import skipped line ${index + 1}: invalid field(s)`
+        );
+        continue;
+      }
+
+      parsed.push({
+        id: makeId('smtp'),
+        label: fromEmail || `${host}:${port}`,
+        host,
+        port,
+        security:
+          port === 465 ? 'ssl' : 'starttls',
+        username,
+        password,
+        fromEmail,
+        enabled: true,
+        maxSends: 350,
+      });
+    }
+
+    return parsed;
+  }
+
+  function importBulkSmtp() {
+    const parsed = parseBulkSmtpInput();
+
+    if (!parsed.length) {
+      onToast('No valid SMTP lines were found', 'warning');
+      return;
+    }
+
+    setAccounts(parsed);
+    setSelectedAccountId(parsed[0].id);
+    setSmtpInvalid([]);
+    setSmtpTemporaryTimeouts([]);
+
+    onLog(
+      'success',
+      `Imported ${parsed.length} SMTP account(s)`
+    );
+    onToast(`Imported ${parsed.length} SMTP account(s)`, 'success');
+  }
+
+  async function testSmtpAccounts() {
+    const candidates = accounts.filter(
+      (account) =>
+        account.enabled &&
+        account.host.trim() &&
+        account.port > 0 &&
+        account.username.trim() &&
+        account.password &&
+        account.fromEmail.trim()
+    );
+
+    if (!candidates.length) {
+      onToast('No configured SMTP accounts to test', 'warning');
+      return;
+    }
+
+    setTestingSmtp(true);
+
+    try {
+      onLog(
+        'info',
+        `Testing ${candidates.length} SMTP account(s)…`
+      );
+
+      const response = await fetch('/api/smtp/test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          accounts: candidates,
+        }),
+      });
+
+      const data = (await response.json()) as {
+        valid?: SmtpAccount[];
+        invalid?: Array<SmtpAccount & { reason: string }>;
+        temporaryTimeouts?: Array<SmtpAccount & { reason: string }>;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+            `SMTP test failed (HTTP ${response.status})`
+        );
+      }
+
+      const valid = data.valid || [];
+      const invalid = data.invalid || [];
+      const temporaryTimeouts =
+        data.temporaryTimeouts || [];
+
+      setAccounts(valid);
+      setSmtpInvalid(invalid);
+      setSmtpTemporaryTimeouts(temporaryTimeouts);
+
+      if (valid.length && !valid.some((a) => a.id === selectedAccountId)) {
+        setSelectedAccountId(valid[0].id);
+      }
+
+      onLog(
+        'success',
+        `SMTP test complete — ${valid.length} valid, ${invalid.length} invalid, ${temporaryTimeouts.length} temporary timeout(s)`
+      );
+
+      invalid.forEach((item) =>
+        onLog(
+          'error',
+          `INVALID SMTP — ${item.fromEmail || item.label} — ${item.reason}`
+        )
+      );
+
+      temporaryTimeouts.forEach((item) =>
+        onLog(
+          'warning',
+          `TEMP SMTP TIMEOUT — ${item.fromEmail || item.label} — ${item.reason}`
+        )
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      onLog('error', `SMTP test failed: ${message}`);
+      onToast(message, 'error');
+    } finally {
+      setTestingSmtp(false);
+    }
+  }
 
   function updateAccount(
     id: string,
@@ -4216,6 +4408,25 @@ function SmtpSenderPanel({
       const formData = new FormData();
       formData.append('accounts', JSON.stringify(plan));
       formData.append('rotateAccounts', rotateAccounts ? 'true' : 'false');
+      formData.append(
+        'connectionTimeoutMs',
+        String(smtpConnectionTimeoutMs)
+      );
+      formData.append('retryCount', String(smtpRetryCount));
+      formData.append('retryDelayMs', String(smtpRetryDelayMs));
+      formData.append(
+        'perAccountDelayMs',
+        String(smtpPerAccountDelayMs)
+      );
+      formData.append('threads', String(smtpThreads));
+      formData.append(
+        'autoRetestTimeouts',
+        smtpAutoRetestTimeouts ? 'true' : 'false'
+      );
+      formData.append(
+        'timeoutRetestDelayMs',
+        String(smtpTimeoutRetestDelayMs)
+      );
       formData.append('recipients', JSON.stringify(recipients));
       formData.append('fromName', fromName);
       formData.append('replyTo', replyTo.trim());
@@ -4304,6 +4515,10 @@ function SmtpSenderPanel({
                   error?: string;
                   sentCount?: number;
                   failedCount?: number;
+                  attempt?: number;
+                  retryCount?: number;
+                  status?: 'invalid' | 'timeout';
+                  account?: SmtpAccount;
                 };
 
                 if (event.type === 'result') {
@@ -4324,6 +4539,105 @@ function SmtpSenderPanel({
                           ? ` — via ${event.accountEmail}`
                           : ''
                       } — ${event.error || 'unknown SMTP error'}`
+                    );
+                  }
+                } else if (event.type === 'retry') {
+                  onLog(
+                    'warning',
+                    `${event.index}/${event.total} SMTP retry ${event.attempt}/${event.retryCount} — ${event.recipient} — ${event.error || 'temporary SMTP error'}`
+                  );
+                } else if (event.type === 'pool_recovered') {
+                  if (event.account) {
+                    setSmtpTemporaryTimeouts((current) =>
+                      current.filter(
+                        (item) =>
+                          item.id !== event.account?.id
+                      )
+                    );
+
+                    setAccounts((current) => {
+                      if (
+                        current.some(
+                          (item) =>
+                            item.id === event.account?.id
+                        )
+                      ) {
+                        return current;
+                      }
+
+                      return [
+                        ...current,
+                        event.account as SmtpAccount,
+                      ];
+                    });
+
+                    onLog(
+                      'success',
+                      `SMTP RECOVERED — ${event.account.fromEmail}`
+                    );
+                  }
+                } else if (event.type === 'pool_update') {
+                  const eventAny = event as typeof event & {
+                    status?: 'invalid' | 'timeout';
+                    account?: SmtpAccount;
+                    reason?: string;
+                  };
+
+                  if (eventAny.account && eventAny.status === 'invalid') {
+                    setAccounts((current) =>
+                      current.filter(
+                        (account) =>
+                          account.id !== eventAny.account?.id
+                      )
+                    );
+
+                    setSmtpInvalid((current) => [
+                      ...current.filter(
+                        (item) =>
+                          item.id !== eventAny.account?.id
+                      ),
+                      {
+                        ...eventAny.account,
+                        reason:
+                          eventAny.reason ||
+                          'SMTP account became invalid during sending',
+                      },
+                    ]);
+
+                    onLog(
+                      'error',
+                      `SMTP REMOVED — ${eventAny.account.fromEmail} — ${
+                        eventAny.reason || 'invalid SMTP'
+                      }`
+                    );
+                  }
+
+                  if (eventAny.account && eventAny.status === 'timeout') {
+                    setAccounts((current) =>
+                      current.filter(
+                        (account) =>
+                          account.id !== eventAny.account?.id
+                      )
+                    );
+
+                    setSmtpTemporaryTimeouts((current) => [
+                      ...current.filter(
+                        (item) =>
+                          item.id !== eventAny.account?.id
+                      ),
+                      {
+                        ...eventAny.account,
+                        reason:
+                          eventAny.reason ||
+                          'Temporary SMTP timeout',
+                      },
+                    ]);
+
+                    onLog(
+                      'warning',
+                      `SMTP TEMP TIMEOUT — ${eventAny.account.fromEmail} — ${
+                        eventAny.reason || 'timeout'
+                      }`
                     );
                   }
                 } else if (event.type === 'complete') {
@@ -4367,6 +4681,108 @@ function SmtpSenderPanel({
             stay in the current dashboard state and are sent only to the local
             3D Suite API for this SMTP run.
           </div>
+
+          <div className="space-y-2 rounded border border-slate-200 p-3">
+            <div className="font-medium">Bulk SMTP import</div>
+            <div className="text-xs text-slate-500">
+              One SMTP per line:
+              {' '}<code>host:port:user:pass:fromemail</code>.
+              Passwords containing <code>:</code> are supported because the final field is treated as the From email.
+            </div>
+
+            <textarea
+              className="input min-h-32 font-mono text-xs"
+              value={smtpBulkInput}
+              onChange={(event) =>
+                setSmtpBulkInput(event.target.value)
+              }
+              placeholder={'smtp.example.com:587:user@example.com:password:user@example.com\\nsmtp2.example.com:465:user2@example.com:password:user2@example.com'}
+            />
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded border border-slate-300 px-3 py-2 text-sm"
+                onClick={importBulkSmtp}
+              >
+                Import SMTPs
+              </button>
+
+              <button
+                type="button"
+                className="rounded bg-[#6C63FF] px-3 py-2 text-sm text-white disabled:opacity-50"
+                disabled={testingSmtp}
+                onClick={() => void testSmtpAccounts()}
+              >
+                {testingSmtp
+                  ? 'Testing SMTPs…'
+                  : `Test SMTPs (${accounts.length})`}
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-3">
+            <div className="rounded border border-emerald-200 bg-emerald-50 p-3">
+              <div className="text-xs font-semibold uppercase text-emerald-700">
+                Valid SMTPs
+              </div>
+              <div className="mt-1 text-2xl font-bold text-emerald-800">
+                {accounts.length}
+              </div>
+            </div>
+
+            <div className="rounded border border-red-200 bg-red-50 p-3">
+              <div className="text-xs font-semibold uppercase text-red-700">
+                Invalid SMTPs
+              </div>
+              <div className="mt-1 text-2xl font-bold text-red-800">
+                {smtpInvalid.length}
+              </div>
+            </div>
+
+            <div className="rounded border border-amber-200 bg-amber-50 p-3">
+              <div className="text-xs font-semibold uppercase text-amber-700">
+                Temporary timeouts
+              </div>
+              <div className="mt-1 text-2xl font-bold text-amber-800">
+                {smtpTemporaryTimeouts.length}
+              </div>
+            </div>
+          </div>
+
+          {(smtpInvalid.length > 0 || smtpTemporaryTimeouts.length > 0) && (
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="max-h-44 overflow-auto rounded border border-red-200 p-2 text-xs">
+                <div className="mb-1 font-semibold text-red-700">
+                  Invalid SMTPs
+                </div>
+                {smtpInvalid.length === 0 ? (
+                  <div className="text-slate-500">None</div>
+                ) : (
+                  smtpInvalid.map((item) => (
+                    <div key={`${item.id}-${item.reason}`} className="mb-1">
+                      {item.fromEmail || item.label} — {item.reason}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="max-h-44 overflow-auto rounded border border-amber-200 p-2 text-xs">
+                <div className="mb-1 font-semibold text-amber-700">
+                  Temporary timeouts
+                </div>
+                {smtpTemporaryTimeouts.length === 0 ? (
+                  <div className="text-slate-500">None</div>
+                ) : (
+                  smtpTemporaryTimeouts.map((item) => (
+                    <div key={`${item.id}-${item.reason}`} className="mb-1">
+                      {item.fromEmail || item.label} — {item.reason}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
 
           {accounts.map((account, index) => (
             <div
@@ -4530,6 +4946,167 @@ function SmtpSenderPanel({
           >
             + Add SMTP account
           </button>
+
+          <div className="space-y-3 rounded border border-slate-200 p-3">
+            <div>
+              <div className="font-medium">SMTP Runtime Controls</div>
+              <div className="text-xs text-slate-500">
+                Tune connection behaviour, retry timing, per-account pacing,
+                and concurrent workers for the current run.
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <Field label="Connection timeout (ms)">
+                <input
+                  type="number"
+                  min={5000}
+                  max={120000}
+                  step={1000}
+                  className="input"
+                  value={smtpConnectionTimeoutMs}
+                  onChange={(event) =>
+                    setSmtpConnectionTimeoutMs(
+                      Math.min(
+                        120000,
+                        Math.max(
+                          5000,
+                          Number(event.target.value || 30000)
+                        )
+                      )
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Retry count">
+                <input
+                  type="number"
+                  min={0}
+                  max={5}
+                  className="input"
+                  value={smtpRetryCount}
+                  onChange={(event) =>
+                    setSmtpRetryCount(
+                      Math.min(
+                        5,
+                        Math.max(
+                          0,
+                          Number(event.target.value || 0)
+                        )
+                      )
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Retry delay (ms)">
+                <input
+                  type="number"
+                  min={0}
+                  max={120000}
+                  step={500}
+                  className="input"
+                  value={smtpRetryDelayMs}
+                  onChange={(event) =>
+                    setSmtpRetryDelayMs(
+                      Math.min(
+                        120000,
+                        Math.max(
+                          0,
+                          Number(event.target.value || 0)
+                        )
+                      )
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Per-SMTP delay (ms)">
+                <input
+                  type="number"
+                  min={0}
+                  max={120000}
+                  step={250}
+                  className="input"
+                  value={smtpPerAccountDelayMs}
+                  onChange={(event) =>
+                    setSmtpPerAccountDelayMs(
+                      Math.min(
+                        120000,
+                        Math.max(
+                          0,
+                          Number(event.target.value || 0)
+                        )
+                      )
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Threads / concurrent sends">
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  className="input"
+                  value={smtpThreads}
+                  onChange={(event) =>
+                    setSmtpThreads(
+                      Math.min(
+                        10,
+                        Math.max(
+                          1,
+                          Number(event.target.value || 1)
+                        )
+                      )
+                    )
+                  }
+                />
+              </Field>
+
+              <Field label="Timeout re-test delay (ms)">
+                <input
+                  type="number"
+                  min={10000}
+                  max={600000}
+                  step={1000}
+                  className="input"
+                  value={smtpTimeoutRetestDelayMs}
+                  onChange={(event) =>
+                    setSmtpTimeoutRetestDelayMs(
+                      Math.min(
+                        600000,
+                        Math.max(
+                          10000,
+                          Number(event.target.value || 60000)
+                        )
+                      )
+                    )
+                  }
+                />
+              </Field>
+            </div>
+
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={smtpAutoRetestTimeouts}
+                onChange={(event) =>
+                  setSmtpAutoRetestTimeouts(event.target.checked)
+                }
+              />
+              <span>
+                <span className="font-medium">
+                  Auto re-test Temporary Timeouts
+                </span>
+                <span className="block text-xs text-slate-500">
+                  Timed-out SMTPs are re-tested after the configured delay and
+                  returned to the active pool if verification succeeds.
+                </span>
+              </span>
+            </label>
+          </div>
 
           <label className="flex items-center gap-2 rounded border border-slate-200 p-3">
             <input
