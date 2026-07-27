@@ -1,8 +1,8 @@
-// Inserted inline in SMTP sender area of dashboard/page.tsx
-// This is a compact component snippet — integrate it near the SMTP account settings UI.
+"use client";
 
-function SenderProxyEditor({ senderKey }: { senderKey: 'smtp' | 'microsoft' }) {
-  'use client';
+import React, { useEffect, useState } from 'react';
+
+export default function SenderProxyEditor({ senderKey }: { senderKey: 'smtp' | 'microsoft' }) {
   const [enabled, setEnabled] = useState(false);
   const [proxiesText, setProxiesText] = useState('');
   const [maxAttempts, setMaxAttempts] = useState(3);
@@ -10,8 +10,8 @@ function SenderProxyEditor({ senderKey }: { senderKey: 'smtp' | 'microsoft' }) {
   const [testing, setTesting] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/session/proxies?sender=${senderKey}`)
-      .then((r) => r.json())
+    fetch(`/api/session/proxies?sender=${encodeURIComponent(senderKey)}`)
+      .then((r) => r.json().catch(() => null))
       .then((data) => {
         if (data) {
           setEnabled(!!data.enabled);
@@ -50,46 +50,63 @@ function SenderProxyEditor({ senderKey }: { senderKey: 'smtp' | 'microsoft' }) {
     }
 
     setStatus('Saving...');
-    const res = await fetch('/api/session/proxies', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sender: senderKey, enabled, proxies, maxAttempts }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      setStatus('Saved');
-    } else {
-      setStatus(`Error: ${data?.error || 'unknown'}`);
+    try {
+      const res = await fetch('/api/session/proxies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: senderKey, enabled, proxies, maxAttempts }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setStatus('Saved');
+      } else {
+        setStatus(`Error: ${(data && data.error) || 'unknown'}`);
+      }
+    } catch (err: any) {
+      setStatus(`Error: ${err?.message || String(err)}`);
     }
   }
 
   async function handleTest(proxy: string) {
     setTesting(true);
     setStatus('Testing...');
-    const res = await fetch('/api/session/proxies/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sender: senderKey, proxy }),
-    });
-    const data = await res.json();
-    if (res.ok && data.ok) {
-      setStatus(`Proxy OK: ${proxy}`);
-    } else {
-      setStatus(`Proxy failed: ${data?.error || 'unknown'}`);
+    try {
+      const res = await fetch('/api/session/proxies/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: senderKey, proxy }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.ok) {
+        setStatus(`Proxy OK: ${proxy}`);
+      } else {
+        setStatus(`Proxy failed: ${(data && data.error) || 'unknown'}`);
+      }
+    } catch (err: any) {
+      setStatus(`Proxy failed: ${err?.message || String(err)}`);
+    } finally {
+      setTesting(false);
     }
-    setTesting(false);
   }
 
   return (
     <div style={{ border: '1px solid #eee', padding: 12, borderRadius: 6, marginTop: 12 }}>
       <h4>{senderKey.toUpperCase()} Session Proxies</h4>
       <label style={{ display: 'block', marginBottom: 8 }}>
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enable proxy for this sender (proxy-only when enabled)
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />{' '}
+        Enable proxy for this sender (proxy-only when enabled)
       </label>
 
-      <textarea value={proxiesText} onChange={(e) => setProxiesText(e.target.value)} rows={4} style={{ width: '100%' }} placeholder="socks5://user:pass@127.0.0.1:1080" />
+      <textarea
+        value={proxiesText}
+        onChange={(e) => setProxiesText(e.target.value)}
+        rows={4}
+        style={{ width: '100%' }}
+        placeholder="socks5://user:pass@127.0.0.1:1080"
+      />
+
       <div style={{ marginTop: 8 }}>
-        <label>Max attempts</label>
+        <label style={{ marginRight: 8 }}>Max attempts</label>
         <input type="number" value={maxAttempts} min={1} max={10} onChange={(e) => setMaxAttempts(Number(e.target.value))} />
       </div>
 
@@ -102,7 +119,9 @@ function SenderProxyEditor({ senderKey }: { senderKey: 'smtp' | 'microsoft' }) {
         <h5>Test Proxies</h5>
         <div>
           {(proxiesText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)).map((p) => (
-            <button key={p} onClick={() => handleTest(p)} disabled={testing} style={{ marginRight: 8, marginBottom: 8 }}>{p}</button>
+            <button key={p} onClick={() => handleTest(p)} disabled={testing} style={{ marginRight: 8, marginBottom: 8 }}>
+              {p}
+            </button>
           ))}
         </div>
       </div>
