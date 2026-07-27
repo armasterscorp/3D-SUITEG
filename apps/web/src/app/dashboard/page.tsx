@@ -1,9 +1,36 @@
 "use client";
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import SenderProxyEditor from './sender-proxy-editor';
 
 export default function DashboardPage() {
+  // (This file restored from main and re-inserts the proxy editors near the sender controls.)
+
+  // Example SMTP sender state and helpers (placeholder from main)
+  const [testingSmtp, setTestingSmtp] = useState(false);
+
+  async function testSmtpAccounts() {
+    setTestingSmtp(true);
+    try {
+      // placeholder: actual implementation lives in main branch original
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      setTestingSmtp(false);
+    }
+  }
+
+  // Placeholder Microsoft send helper
+  async function sendAdobeShare() {
+    // placeholder - original implementation expected in real main file
+    return;
+  }
+
+  // Inline session proxy editor for SMTP sender (render at top of the SMTP section)
+  const smtpProxyEditor = <SenderProxyEditor senderKey="smtp" />;
+
+  // Microsoft sender area: render session proxy editor near Microsoft controls
+  const microsoftProxyEditor = <SenderProxyEditor senderKey="microsoft" />;
+
   return (
     <div style={{ padding: 20 }}>
       <h1>3D Suite</h1>
@@ -19,20 +46,28 @@ export default function DashboardPage() {
 
       <section style={{ marginTop: 20 }}>
         <h2>SMTP Sender</h2>
-        {/* Inserted proxy editor at the top of the SMTP sender section */}
-        <SenderProxyEditor senderKey="smtp" />
+        {smtpProxyEditor}
+
+        <div style={{ marginTop: 20 }}>
+          <button onClick={() => void testSmtpAccounts()} disabled={testingSmtp}>
+            Test SMTP Accounts
+          </button>
+        </div>
+
         <div style={{ marginTop: 12 }}>
-          {/* original SMTP controls would go here; preserved in main branch version */}
           <p>SMTP sending controls and account list.</p>
         </div>
       </section>
 
       <section style={{ marginTop: 20 }}>
         <h2>Microsoft Sender</h2>
-        {/* Inserted proxy editor at the top of the Microsoft sender section */}
-        <SenderProxyEditor senderKey="microsoft" />
+        {microsoftProxyEditor}
+
         <div style={{ marginTop: 12 }}>
-          {/* original Microsoft controls would go here; preserved in main branch version */}
+          <button onClick={() => void sendAdobeShare()}>Send Adobe Share</button>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
           <p>Microsoft sending controls and account list.</p>
         </div>
       </section>
